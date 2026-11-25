@@ -30,4 +30,16 @@ path(
     api_views.api_forecast,
     name="api-forecast",
 ),
+
+path(
+    "api/dashboard/confidence/",
+    api_views.api_confidence,
+    name="api-confidence",
+),
+
+path(
+    "api/dashboard/anomalies/",
+    api_views.api_anomalies,
+    name="api-anomalies",
+),
 ]

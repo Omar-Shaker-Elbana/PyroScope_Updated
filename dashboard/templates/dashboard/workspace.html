@@ -21,6 +21,7 @@
         <nav class="sidebar-nav" aria-label="Main navigation">
             <a href="#top" class="nav-link active"><span class="nav-icon">⌂</span> Overview</a>
             <a href="#map-section" class="nav-link"><span class="nav-icon">◎</span> World Map</a>
+            <a href="#harmonized-section" class="nav-link"><span class="nav-icon">🛰</span> Our Data</a>
             <a href="#stats" class="nav-link"><span class="nav-icon">▦</span> Analytics</a>
             <a href="#calendar-section" class="nav-link"><span class="nav-icon">▤</span> Fire Calendar</a>
             <a href="#anomaly-section" class="nav-link"><span class="nav-icon">⚡</span> Anomalies</a>
@@ -69,6 +70,39 @@
       <p class="mut" id="msg"></p>
     </section>
 
+    <section class="card" id="harmonized-section">
+      <style>
+        #harmonized-section .hd-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px}
+        #harmonized-section .hd-stats .stat{background:var(--card,#fff);border:1px solid var(--ln,#e4ded6);border-radius:10px;padding:10px}
+        #harmonized-section .hd-stats .stat b{display:block;font-size:20px}
+        #harmonized-section .hd-stats .stat small{color:var(--mut,#6b655e)}
+        #harmonized-section canvas{width:100%;display:block;border-radius:10px;background:var(--bg,#faf8f5);border:1px solid var(--ln,#e4ded6)}
+        #harmonized-section .hd-wrap{overflow-x:auto;margin-top:10px}
+        #harmonized-section table{width:100%;border-collapse:collapse;font-size:13px}
+        #harmonized-section th,#harmonized-section td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--ln,#e4ded6);white-space:nowrap}
+        #harmonized-section td.n,#harmonized-section th.n{text-align:right}
+        #harmonized-section .hd-ctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}
+      </style>
+      <div class="section-heading"><div><p class="eyebrow">FROM OUR PIPELINE</p><h2>Harmonized fire history</h2></div><span class="section-chip">REAL DATA</span></div>
+      <p class="mut">The actual MODIS + VIIRS history our pipeline has harmonized, read straight from <code>calendar_cells.csv</code> -- not the demo/live explorer above.</p>
+      <p class="mut" id="hdMsg">Loading harmonized history…</p>
+      <div class="hd-stats" id="hdStats"></div>
+      <canvas id="hdMap" height="200"></canvas>
+      <div class="hd-ctl">
+        <label class="mut">From <input type="date" id="hdStart"></label>
+        <label class="mut">To <input type="date" id="hdEnd"></label>
+        <button class="g" id="hdApply">Update</button>
+        <button class="g" id="hdAll">Full history</button>
+      </div>
+      <div class="hd-wrap"><table id="hdTable" hidden><thead><tr><th>Lat</th><th>Lon</th><th class="n">Detections</th><th class="n">Active cell-days</th><th class="n">FRP (MW)</th></tr></thead><tbody></tbody></table></div>
+
+      <div class="section-heading" style="margin-top:18px"><div><p class="eyebrow">PICK A REGION</p><h2>Regional detail, from our data</h2></div></div>
+      <div class="ctl" id="hdPresets"></div>
+      <p class="mut" id="hdRegionMsg"></p>
+      <div class="hd-stats" id="hdRegionStats"></div>
+      <canvas id="hdRegionSpark" height="70"></canvas>
+    </section>
+
     <div class="section-heading results-heading">
       <div><p class="eyebrow">SELECTED REGION</p><h2 id="sel">Select an area on the map</h2></div>
       <span class="section-chip">REGIONAL INSIGHTS</span>
@@ -89,8 +123,31 @@
         <label class="mut">Probability threshold <input type="range" id="pt" min=".3" max=".9" step=".05" value=".5"></label>
         <canvas id="win"></canvas><ul id="wins"></ul>
       </section>
-      <section class="card" id="anomaly-section"><div class="section-heading"><div><p class="eyebrow">PATTERN DETECTION</p><h2>Unusual activity</h2></div></div>
+      <section class="card" id="anomaly-section">
+        <style>
+          #anomaly-section .ga-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin:12px 0}
+          #anomaly-section .ga-stats .stat{background:var(--card,#fff);border:1px solid var(--ln,#e4ded6);border-radius:10px;padding:10px}
+          #anomaly-section .ga-stats .stat b{display:block;font-size:18px}
+          #anomaly-section .ga-stats .stat small{color:var(--mut,#6b655e)}
+          #anomaly-section canvas{width:100%;display:block;border-radius:10px;background:var(--bg,#faf8f5);border:1px solid var(--ln,#e4ded6)}
+          #anomaly-section .ga-wrap{overflow-x:auto;margin-top:10px}
+          #anomaly-section table{width:100%;border-collapse:collapse;font-size:13px}
+          #anomaly-section th,#anomaly-section td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--ln,#e4ded6);white-space:nowrap}
+          #anomaly-section td.n,#anomaly-section th.n{text-align:right}
+          #anomaly-section .ga-warn{color:var(--acc,#d9480f);font-weight:600}
+        </style>
+        <div class="section-heading"><div><p class="eyebrow">PATTERN DETECTION</p><h2>Unusual activity</h2></div></div>
         <p class="mut">Harmonized days far above the same season in other years.</p><ol id="anom"></ol>
+
+        <div class="section-heading" style="margin-top:14px"><div><p class="eyebrow">FROM OUR PIPELINE (GLOBAL)</p><h2>Anomaly detection &amp; explanation</h2></div></div>
+        <p class="mut">World-wide, not scoped to the map selection above -- <code>detect_anomalies</code> works on the global daily calendar.</p>
+        <p class="mut" id="gaMsg">Loading…</p>
+        <div class="ga-stats" id="gaStats"></div>
+        <canvas id="gaSpark" height="90"></canvas>
+        <div class="ga-wrap"><table id="gaEventsTable" hidden><thead><tr><th>Episode</th><th>Peak day</th><th class="n">Peak z</th><th class="n">Total FRP (MW)</th><th class="n">Excess FRP (MW)</th><th>Robustness</th></tr></thead><tbody></tbody></table></div>
+        <p class="mut" id="gaWinMsg" style="margin-top:8px"></p>
+        <ul id="gaWindows"></ul>
+        <p class="mut" id="gaCaveat"></p>
       </section>
     </div>
 
@@ -139,6 +196,28 @@
         <div><h3 id="fcDetH">Selected country</h3><div class="fc-stats" id="fcDetStats" style="margin-top:6px"></div><canvas id="fcChart" aria-label="Country forecast chart"></canvas><p class="mut" id="fcTip"></p></div>
       </div>
       <p class="mut" id="fcNote"></p>
+    </section>
+
+    <section class="card" id="confidence-section">
+      <style>
+        #confidence-section .cf-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-top:12px}
+        #confidence-section .cf-stats .stat{background:var(--card,#fff);border:1px solid var(--ln,#e4ded6);border-radius:10px;padding:10px}
+        #confidence-section .cf-stats .stat b{display:block;font-size:26px}
+        #confidence-section .cf-stats .stat small{color:var(--mut,#6b655e)}
+        #confidence-section .cf-wrap{overflow-x:auto;margin-top:12px}
+        #confidence-section table{width:100%;border-collapse:collapse;font-size:14px}
+        #confidence-section th,#confidence-section td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--ln,#e4ded6);white-space:nowrap}
+        #confidence-section td.n,#confidence-section th.n{text-align:right}
+        #confidence-section .cf-tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid var(--ln,#e4ded6)}
+        #confidence-section .cf-tag.ok{background:color-mix(in srgb,#2f9e44 16%,transparent)}
+        #confidence-section .cf-tag.hi,#confidence-section .cf-tag.lo{background:color-mix(in srgb,var(--acc,#d9480f) 16%,transparent)}
+        #confidence-section .cf-tag.na{opacity:.7}
+      </style>
+      <div class="section-heading"><div><p class="eyebrow">REAL-TIME CHECK</p><h2>How much to trust the latest readings</h2></div><span class="section-chip">DATA vs FORECAST</span></div>
+      <p class="mut" id="cfMsg">Loading confidence…</p>
+      <div class="cf-stats" id="cfStats"></div>
+      <div class="cf-wrap"><table id="cfTable" hidden><thead><tr><th>Country</th><th>Latest complete day</th><th class="n">Reading (MW)</th><th class="n">Data confidence</th><th class="n">With forecast</th><th>Versus our forecast</th></tr></thead><tbody></tbody></table></div>
+      <details style="margin-top:10px"><summary class="mut">How these percentages are calculated</summary><div class="mut" id="cfMethod"></div></details>
     </section>
 </main>
 </div>
@@ -347,6 +426,186 @@ matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>setTimeo
 (async()=>{const u=['forecastUrl','recentUrl','metricsUrl'].map(k=>root.dataset[k]);if(!u[0])return;
  try{const fs=[];for(const url of u){if(!url)continue;const r=await fetch(url);if(!r.ok)throw Error(url+' → HTTP '+r.status);fs.push(new File([await r.text()],url.split('/').pop()||'file',{type:'text/plain'}))}await ingest(fs)}catch(e){$('#fcMsg').textContent='Could not auto-load model outputs: '+e.message}})();
 render();
+})();
+</script>
+
+<script>
+(()=>{
+const $=s=>document.querySelector(s),el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+const pct=v=>Number.isFinite(v)?v.toFixed(1).replace(/\.0$/,'')+'%':'—';
+const LBL={within_forecast_range:['inside forecast range','ok'],above_forecast_range:['above forecast range','hi'],below_forecast_range:['below forecast range','lo'],no_prior_forecast:['no earlier forecast yet','na']};
+(async()=>{
+ const msg=$('#cfMsg');
+ try{
+  const r=await fetch('/api/dashboard/confidence/');const j=await r.json().catch(()=>({}));
+  if(!r.ok||!j.success)throw Error(j.error||('HTTP '+r.status));
+  const o=j.overall||{},cs=j.countries||[];
+  msg.textContent=`Newest complete day: ${j.generated_for_date}. ${o.countries} countries; ${o.countries_with_forecast_comparison} compared with an earlier forecast.`;
+  const st=$('#cfStats');st.replaceChildren();
+  const stat=(v,l,sub)=>{const d=el('div','stat');d.append(el('b',null,v),el('span',null,l));if(sub)d.append(el('br'),el('small',null,sub));st.append(d)};
+  stat(pct(o.data_confidence_pct),'Real-time data confidence','quality of the newest readings on their own');
+  stat(pct(o.corroborated_confidence_pct),'With our forecast','after checking them against what we predicted');
+  const cmp=o.countries_with_forecast_comparison||0;
+  stat(cmp?`${o.within_forecast_range}/${cmp}`:'—','Readings inside forecast range',cmp?'countries matching their predicted band':'comparison starts once a forecast has been archived for a later day');
+  stat(String(o.scored_forecasts_total??0),'Past forecasts scored',`over ${o.forecast_history_days??0} forecast days`);
+  const tb=$('#cfTable tbody');tb.replaceChildren();
+  cs.slice(0,15).forEach(c=>{const tr=el('tr');const [t,k]=LBL[c.agreement]||[c.agreement,'na'];
+   const tag=el('td');tag.append(el('span','cf-tag '+k,t));
+   tr.append(el('td',null,c.name||c.country),el('td',null,c.date),el('td','n',Math.round(c.observed).toLocaleString()),el('td','n',pct(c.data_confidence_pct)),el('td','n',pct(c.corroborated_confidence_pct)),tag);tb.append(tr)});
+  $('#cfTable').hidden=!cs.length;
+  const m=j.method||{},box=$('#cfMethod');box.replaceChildren();
+  [['Data confidence',m.data_confidence],['Forecast track record',m.forecast_track_record],['With forecast',m.corroborated],['Caveat',m.caveat]].forEach(([a,b])=>{if(b){const p=el('p');p.append(el('b',null,a+': '),document.createTextNode(b));box.append(p)}});
+ }catch(e){msg.textContent='Confidence not available yet: '+e.message}
+})();
+})();
+</script>
+
+<script>
+// Shared by the harmonized-history and anomaly scripts below: draws one line series on a
+// canvas. Call twice with {noClear:true, min, max} to overlay two series at the same scale.
+function sparkline(canvas,series,opts={}){
+ const dp=devicePixelRatio||1,w=canvas.clientWidth,h=opts.height||canvas.clientHeight||70;
+ if(!opts.noClear){canvas.width=w*dp;canvas.height=h*dp;canvas.style.height=h+'px'}
+ const ctx=canvas.getContext('2d');
+ if(!opts.noClear){ctx.scale(dp,dp);ctx.clearRect(0,0,w,h)}
+ const vals=series.map(p=>p.y).filter(Number.isFinite);
+ if(!vals.length)return{min:0,max:1};
+ const mn=opts.min??Math.min(0,...vals),mx=opts.max??Math.max(...vals,1e-9);
+ const X=i=>(w-4)*i/Math.max(series.length-1,1)+2,Y=v=>h-4-(h-8)*(v-mn)/((mx-mn)||1);
+ ctx.strokeStyle=opts.color||'#d9480f';ctx.lineWidth=opts.width||1.5;ctx.beginPath();
+ let started=false;
+ series.forEach((p,i)=>{if(!Number.isFinite(p.y))return;started?ctx.lineTo(X(i),Y(p.y)):(ctx.moveTo(X(i),Y(p.y)),started=true)});
+ ctx.stroke();
+ if(opts.markers){
+  ctx.fillStyle=opts.markerColor||'#e03131';
+  series.forEach((p,i)=>{if(Number.isFinite(p.y)&&opts.markers(p)){ctx.beginPath();ctx.arc(X(i),Y(p.y),2.4,0,7);ctx.fill()}});
+ }
+ return{min:mn,max:mx};
+}
+</script>
+
+<script>
+(()=>{
+const $=s=>document.querySelector(s),el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+const num=(v,d=0)=>Number.isFinite(v)?v.toLocaleString(undefined,{maximumFractionDigits:d}):'—';
+const PRESETS=[['Egypt',27,30],['Amazon arc',-9,-55],['Sahel',12,2],['Congo basin',-4,22],['California',37,-120],['Siberia',58,110],['N. Australia',-13,132]];
+
+function drawGrid(cells){
+ const c=$('#hdMap'),dp=devicePixelRatio||1,w=c.clientWidth,h=200;
+ c.width=w*dp;c.height=h*dp;c.style.height=h+'px';
+ const ctx=c.getContext('2d');ctx.scale(dp,dp);ctx.clearRect(0,0,w,h);
+ ctx.strokeStyle='rgba(120,120,120,.25)';ctx.lineWidth=1;ctx.strokeRect(.5,.5,w-1,h-1);
+ const X=lo=>(lo+180)/360*w,Y=la=>(90-la)/180*h;
+ const mx=Math.max(1,...cells.map(c=>c.active_cell_days));
+ for(const cell of cells){
+  const t=Math.sqrt(cell.active_cell_days/mx),r=Math.max(w/90,3);
+  ctx.fillStyle=`hsla(${22-14*t},90%,${55-10*t}%,${.25+.65*t})`;
+  ctx.beginPath();ctx.arc(X(cell.lon),Y(cell.lat),r,0,7);ctx.fill();
+ }
+}
+
+async function loadMap(params){
+ const msg=$('#hdMsg');
+ try{
+  const r=await fetch('/api/dashboard/map/?grid_deg=4'+params);const j=await r.json();
+  if(!r.ok||!j.success)throw Error(j.error||('HTTP '+r.status));
+  if(!j.period){msg.textContent=j.note||'No detections for this period.';$('#hdStats').replaceChildren();$('#hdTable').hidden=true;drawGrid([]);return}
+  msg.textContent=`${j.period.start} to ${j.period.end} · reference satellite ${j.reference_satellite}`;
+  const st=$('#hdStats');st.replaceChildren();
+  const stat=(v,l)=>{const d=el('div','stat');d.append(el('b',null,v),el('span',null,l));st.append(d)};
+  stat(num(j.summary.detections),'Raw detections (reference VIIRS)');
+  stat(num(j.summary.active_cell_days),'Active cell-days');
+  stat(num(j.summary.frp_mw,0)+' MW','Total FRP');
+  stat(String(j.cells.length),'5° grid cells shown (top, by activity)');
+  drawGrid(j.cells);
+  const tb=$('#hdTable tbody');tb.replaceChildren();
+  j.cells.slice(0,8).forEach(c=>{
+   const tr=el('tr');
+   tr.append(el('td',null,c.lat.toFixed(1)+'°'),el('td',null,c.lon.toFixed(1)+'°'),
+            el('td','n',num(c.detections)),el('td','n',num(c.active_cell_days)),el('td','n',num(c.frp_mw,0)));
+   tb.append(tr);
+  });
+  $('#hdTable').hidden=!j.cells.length;
+ }catch(e){msg.textContent='Harmonized history not available yet: '+e.message;$('#hdStats').replaceChildren();$('#hdTable').hidden=true;drawGrid([])}
+}
+
+async function loadRegion(name,lat,lon){
+ const half=12,bounds=`west=${lon-half}&south=${lat-half}&east=${lon+half}&north=${lat+half}`;
+ const msg=$('#hdRegionMsg');msg.textContent=`Loading ${name}…`;
+ try{
+  const r=await fetch('/api/dashboard/region/?'+bounds);const j=await r.json();
+  if(!r.ok||!j.success)throw Error(j.error||('HTTP '+r.status));
+  let line=`${name} (±${half}°) · reference satellite ${j.reference_satellite}`;
+  const cal=Object.entries(j.calibration||{}).map(([sat,c])=>`${sat} ${c.k!=null?c.k.toFixed(2)+'×':'n/a'} (${c.k_trust||'n/a'})`).join(' · ');
+  if(cal)line+=' · MODIS scale '+cal;
+  msg.textContent=line;
+  const st=$('#hdRegionStats');st.replaceChildren();
+  const stat=(v,l)=>{const d=el('div','stat');d.append(el('b',null,v),el('span',null,l));st.append(d)};
+  stat(num(j.summary.recorded_viirs_detections),'VIIRS detections');
+  stat(num(j.summary.recorded_modis_detections),'MODIS detections');
+  stat(num(j.summary.unique_active_cell_days),'Unique active cell-days');
+  stat(j.summary.viirs_frp_mw!=null?num(j.summary.viirs_frp_mw,0)+' MW':'—','VIIRS FRP');
+  const series=(j.daily||[]).map((d,i)=>({x:i,y:d.viirs_frp_mw??d.unique_active_grid_cells??null}));
+  sparkline($('#hdRegionSpark'),series,{color:'#d9480f'});
+ }catch(e){msg.textContent=`${name}: `+e.message;$('#hdRegionStats').replaceChildren();sparkline($('#hdRegionSpark'),[])}
+}
+
+$('#hdPresets').replaceChildren(...PRESETS.map(([n,a,o])=>{const b=el('button','g',n);b.onclick=()=>loadRegion(n,a,o);return b}));
+$('#hdApply').onclick=()=>{const s=$('#hdStart').value,e=$('#hdEnd').value;let q='';if(s)q+='&start='+s;if(e)q+='&end='+e;loadMap(q)};
+$('#hdAll').onclick=()=>{$('#hdStart').value='';$('#hdEnd').value='';loadMap('')};
+loadMap('');
+loadRegion(...PRESETS[0]);
+})();
+</script>
+
+<script>
+(()=>{
+const $=s=>document.querySelector(s),el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+const num=(v,d=0)=>Number.isFinite(v)?v.toLocaleString(undefined,{maximumFractionDigits:d}):'—';
+(async()=>{
+ const msg=$('#gaMsg');
+ try{
+  const r=await fetch('/api/dashboard/anomalies/?days=400');const j=await r.json();
+  if(!r.ok||!j.success)throw Error(j.error||('HTTP '+r.status));
+  const rep=j.report||{};
+  msg.textContent=rep.reliable===false
+   ?`Caution: these results are flagged unreliable (${(rep.reasons_unreliable||[]).join('; ')}).`
+   :`Based on ${rep.years_of_valid_days??'?'} years of valid harmonized days, world-wide.`;
+  msg.classList.toggle('ga-warn',rep.reliable===false);
+  const st=$('#gaStats');st.replaceChildren();
+  const stat=(v,l)=>{const d=el('div','stat');d.append(el('b',null,v),el('span',null,l));st.append(d)};
+  stat(String(rep.episodes??0),'Unusual episodes found');
+  stat(String(rep.anomalous_days_high??0),'Days flagged high');
+  stat(String(rep.anomalous_days_low??0),'Days flagged low (often an outage, not less fire)');
+  stat(rep.median_window_days!=null?rep.median_window_days.toFixed(0)+' days':'—','Median critical-window length');
+
+  const daily=j.daily||[];
+  const actual=daily.map((d,i)=>({x:i,y:d.frp_mw,flag:d.flag}));
+  const base=daily.map((d,i)=>({x:i,y:d.baseline_mw}));
+  const vals=[...actual,...base].map(p=>p.y).filter(Number.isFinite);
+  const mn=Math.min(0,...vals),mx=Math.max(...vals,1);
+  sparkline($('#gaSpark'),base,{color:'rgba(130,130,130,.6)',min:mn,max:mx});
+  sparkline($('#gaSpark'),actual,{color:'#d9480f',min:mn,max:mx,noClear:true,markers:p=>p.flag==='high'});
+
+  const ev=j.events||[];
+  const tb=$('#gaEventsTable tbody');tb.replaceChildren();
+  ev.forEach(e=>{
+   const tr=el('tr');
+   tr.append(el('td',null,`${e.start} – ${e.end}`),el('td',null,e.peak_date),
+            el('td','n',Number.isFinite(e.peak_z)?e.peak_z.toFixed(1):'—'),
+            el('td','n',num(e.total_frp_mw,0)),el('td','n',num(e.excess_frp_mw,0)),el('td',null,e.robustness||'—'));
+   tb.append(tr);
+  });
+  $('#gaEventsTable').hidden=!ev.length;
+
+  const win=j.windows||[];
+  $('#gaWinMsg').textContent=win.length?'Typical critical burning window(s), world-wide:':'No critical window identified.';
+  $('#gaWindows').replaceChildren(...win.map(w=>
+   el('li',null,`${w.start} – ${w.end} (peak ${w.peak}) · ${w.length_days} days · ${(w.share_of_annual_frp*100).toFixed(0)}% of annual FRP`)));
+
+  $('#gaCaveat').textContent=rep.caveat||'';
+ }catch(e){msg.textContent='Anomaly data not available yet: '+e.message}
+})();
 })();
 </script>
 

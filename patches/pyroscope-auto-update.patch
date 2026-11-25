@@ -1,0 +1,237 @@
+diff --git a/README.md b/README.md
+index 755aa6c..e951d8a 100644
+--- a/README.md
++++ b/README.md
+@@ -209,3 +209,15 @@ The headline constant `k`, its spatial-cell bootstrap interval, and per-year cel
+ **Resource limits still apply.** Disk-backed processing trades RAM for temporary disk: allow substantial free space for SQLite indexes, matched-pair spill files and outputs (the exact amount depends on input size and overlap). Temporary staging files are removed after a successful run. A run killed midway can leave `pyroscope_dedupe_*` / `pyroscope_stream_*` folders in the output directory; the next `preprocess` or `harmonize` run deletes such folders when they are more than an hour old. Matching still holds one UTC day's rows for one MODIS satellite and the corresponding VIIRS time window in memory; an unusually dense single day can therefore require more RAM than an ordinary day. The default 0.5-degree analysis grid keeps the exact bootstrap's cell-level sufficient statistics bounded by the active grid cells, but very fine global grids increase that cost. `PYRO_OUT_OF_CORE=0` deliberately disables this protection.
+ 
+ `python -m core.src.plot_overview` already scans standardized CSVs in chunks. `calendar_daily.csv` is a daily time series and remains small compared with the raw detections; downstream anomaly analysis continues to read that daily calendar.
++
++## 11. Keeping it current automatically (`auto_update`)
++
++Once section 7's one-time archive backfill and `train_countries` have run, `auto_update` keeps the calendar and the forecast fresh without re-running the whole pipeline by hand:
++
++```bash
++python manage.py auto_update
++```
++
++On its first run in a UTC day it (1) looks at the newest day already in `calendar_daily.csv`, (2) downloads NASA FIRMS **NRT** data (`core.src.download_firms`, not the ~5-month-delayed `_SP` archive sources) for every day after that through today UTC, (3) re-runs `preprocess` + `harmonize`, and (4) re-runs `predict_countries` so `forecast_by_country.csv` reflects the new data. Re-running it again the same UTC day is a no-op (tracked in `data/processed/auto_update_state.json`); pass `--force` to pull again anyway, which also re-downloads today's NRT file since NRT data streams in throughout the day. If `calendar_daily.csv` does not exist yet it fetches `--initial-lookback-days` (default 10) of NRT data instead of failing, but that is only enough for a demo -- do the real archive backfill for anything else. If no trained model is found at `data/outputs/model_countries.joblib` the calendar is still refreshed but `predict_countries` is skipped with a message to run `train_countries` first.
++
++Options: `--sources` (default `MODIS_NRT VIIRS_SNPP_NRT`; an `_SP` name is mapped to its `_NRT` equivalent automatically), `--bbox` (default `$PYRO_BBOX`, else global), `--skip-predict` (refresh the calendar only), `--with-anomalies` (also run `detect_anomalies`). Schedule it once a day with cron / Windows Task Scheduler / a CI schedule; it is always safe to run more often by hand, since the state file is what limits it to one real pull per UTC day.
+diff --git a/core/src/auto_update.py b/core/src/auto_update.py
+new file mode 100644
+index 0000000..9507a56
+--- /dev/null
++++ b/core/src/auto_update.py
+@@ -0,0 +1,175 @@
++"""python manage.py auto_update [--force] [--sources ...] [--bbox west,south,east,north]
++                                [--initial-lookback-days N] [--skip-predict] [--with-anomalies]
++
++Idempotent daily refresh. On its FIRST run in a UTC day it:
++
++  1. looks at the newest day already in data/processed/calendar_daily.csv (or, if the
++     calendar does not exist yet, starts --initial-lookback-days before today);
++  2. downloads NASA FIRMS **near-real-time (NRT)** data for every day after that through
++     today, UTC (core.src.download_firms -- NRT, not the ~5-month-delayed *_SP archive
++     sources, see README section 7);
++  3. re-runs preprocess + harmonize so the calendar covers the new day(s);
++  4. re-runs predict_countries so forecast_by_country.csv / recent_by_country.csv reflect
++     the new data.
++
++Re-running it again the same UTC day is a no-op (checked against
++data/processed/auto_update_state.json) -- pass --force to pull again anyway (this also
++re-downloads today's NRT file even if it already exists, since NRT data streams in
++throughout the day).
++
++This does NOT replace the one-time archive backfill (README section 7): run
++    python manage.py download_firms --start ... --end ... --sources MODIS_SP VIIRS_SNPP_SP
++once first to build real multi-year history (and `train_countries` once on top of it), then
++let this command keep the calendar and the forecast current from then on. Needs
++FIRMS_MAP_KEY set, same as download_firms.
++
++Intended to be run once a day (cron / Windows Task Scheduler / a CI schedule); it is also
++always safe to run more often by hand -- the state file is what limits it to one real pull
++per UTC day.
++"""
++import argparse
++import json
++import os
++import subprocess
++import sys
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++import pandas as pd
++
++from core.src.config import PROCESSED_DIR, OUTPUTS_DIR, ensure_dirs
++
++# core/src/auto_update.py -> parents[2] is the repo root (where manage.py lives), the same
++# depth config.py uses for its default ROOT -- computed independently of PYRO_DATA_ROOT so
++# this still finds manage.py even when PYRO_DATA_ROOT points data at a different folder.
++MANAGE_PY = Path(__file__).resolve().parents[2] / "manage.py"
++STATE_FILE_NAME = "auto_update_state.json"
++
++# SP (standard, science-quality) archive sources and their NRT (near-real-time) counterparts.
++# _SP lags real time by ~5 months (README section 7), so the daily top-up has to use _NRT,
++# on the same satellites the archive was built with -- an _SP name here is mapped, not used as-is.
++NRT_OF = {
++    "MODIS_SP": "MODIS_NRT", "MODIS_NRT": "MODIS_NRT",
++    "VIIRS_SNPP_SP": "VIIRS_SNPP_NRT", "VIIRS_SNPP_NRT": "VIIRS_SNPP_NRT",
++    "VIIRS_NOAA20_SP": "VIIRS_NOAA20_NRT", "VIIRS_NOAA20_NRT": "VIIRS_NOAA20_NRT",
++    "VIIRS_NOAA21_SP": "VIIRS_NOAA21_NRT", "VIIRS_NOAA21_NRT": "VIIRS_NOAA21_NRT",
++}
++DEFAULT_SOURCES = ["MODIS_NRT", "VIIRS_SNPP_NRT"]
++
++
++def _state_path() -> Path:
++    return PROCESSED_DIR / STATE_FILE_NAME
++
++
++def _load_state() -> dict:
++    p = _state_path()
++    if not p.exists():
++        return {}
++    try:
++        return json.loads(p.read_text())
++    except (json.JSONDecodeError, OSError):
++        return {}
++
++
++def _save_state(state: dict) -> None:
++    ensure_dirs()
++    _state_path().write_text(json.dumps(state, indent=2, default=str))
++
++
++def _last_calendar_date():
++    """Newest UTC day already in calendar_daily.csv, or None if it does not exist / is empty."""
++    path = PROCESSED_DIR / "calendar_daily.csv"
++    if not path.exists():
++        return None
++    dates = pd.to_datetime(pd.read_csv(path, usecols=["date"])["date"], errors="coerce").dropna()
++    if dates.empty:
++        return None
++    return dates.max().date()
++
++
++def _run_step(args: list[str]) -> None:
++    """Run one `python manage.py <args>` step, streaming its output, and raise if it fails."""
++    print(f"\n$ {sys.executable} manage.py {' '.join(args)}", flush=True)
++    subprocess.run([sys.executable, str(MANAGE_PY)] + args, check=True, cwd=str(MANAGE_PY.parent))
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--force", action="store_true",
++                     help="pull again even if auto_update already completed today (UTC); "
++                          "also re-downloads today's NRT file if it already exists")
++    ap.add_argument("--sources", nargs="+", default=None,
++                     help=f"FIRMS sources to pull (default: {DEFAULT_SOURCES}); an _SP name "
++                          "is mapped to its _NRT equivalent automatically")
++    ap.add_argument("--bbox", default=os.getenv("PYRO_BBOX"),
++                     help="west,south,east,north for the FIRMS request (default: $PYRO_BBOX, else global)")
++    ap.add_argument("--initial-lookback-days", type=int, default=10,
++                     help="days of NRT history to fetch when calendar_daily.csv does not exist yet (default: 10)")
++    ap.add_argument("--skip-predict", action="store_true",
++                     help="refresh the calendar but do not run predict_countries")
++    ap.add_argument("--with-anomalies", action="store_true",
++                     help="also run detect_anomalies after harmonize")
++    args = ap.parse_args()
++
++    today = datetime.now(timezone.utc).date()
++    state = _load_state()
++
++    if not args.force and state.get("last_run_date") == today.isoformat() and state.get("status") == "ok":
++        print(f"auto_update already completed today ({today.isoformat()} UTC); nothing to do "
++              "(pass --force to pull again).")
++        return
++
++    last = _last_calendar_date()
++    if last is None:
++        start = today - timedelta(days=args.initial_lookback_days)
++        print(f"No calendar_daily.csv yet: fetching the last {args.initial_lookback_days} day(s) of NRT "
++              "data to start. For real multi-year history, run the one-time archive backfill first "
++              "(README section 7) before relying on this for anything but a demo.")
++    else:
++        start = last + timedelta(days=1)
++    if args.force and start > today:
++        start = today  # re-pull at least today even if the calendar already reaches it
++
++    sources = [NRT_OF.get(s.upper(), s.upper()) for s in (args.sources or DEFAULT_SOURCES)]
++
++    if start > today:
++        print(f"Calendar already covers through {last} (today is {today}); nothing new to pull.")
++        _save_state({"last_run_date": today.isoformat(), "status": "ok", "note": "already current",
++                     "checked_at": datetime.now(timezone.utc).isoformat()})
++        return
++
++    try:
++        dl_args = ["download_firms", "--start", start.isoformat(), "--end", today.isoformat(),
++                   "--sources", *sources]
++        if args.bbox:
++            dl_args += ["--bbox", args.bbox]
++        if args.force:
++            dl_args.append("--force")
++        _run_step(dl_args)
++
++        _run_step(["preprocess"])
++        _run_step(["harmonize"])
++        if args.with_anomalies:
++            _run_step(["detect_anomalies"])
++
++        if args.skip_predict:
++            print("\n--skip-predict set: calendar refreshed, forecast left untouched.")
++        elif not (OUTPUTS_DIR / "model_countries.joblib").exists():
++            print(f"\nNo trained model at {OUTPUTS_DIR / 'model_countries.joblib'}; calendar refreshed, "
++                  "but skipping predict_countries. Run `python manage.py train_countries ...` once first.")
++        else:
++            _run_step(["predict_countries"])
++    except subprocess.CalledProcessError as e:
++        _save_state({**state, "status": "error", "failed_step": list(e.cmd),
++                     "failed_at": datetime.now(timezone.utc).isoformat()})
++        sys.exit(f"\nauto_update FAILED at step {list(e.cmd)!r} (exit {e.returncode}); today is NOT "
++                 "marked done, so the next run will retry from here.")
++
++    _save_state({"last_run_date": today.isoformat(), "last_pulled_start": start.isoformat(),
++                 "last_pulled_end": today.isoformat(), "sources": sources, "status": "ok",
++                 "completed_at": datetime.now(timezone.utc).isoformat()})
++    print(f"\nDone: calendar refreshed through {today.isoformat()} (UTC) and forecast updated.")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ingestion/management/commands/auto_update.py b/ingestion/management/commands/auto_update.py
+new file mode 100644
+index 0000000..f2f3854
+--- /dev/null
++++ b/ingestion/management/commands/auto_update.py
+@@ -0,0 +1,30 @@
++"""python manage.py auto_update [--force] [--sources ...] [--bbox ...] [--skip-predict] [--with-anomalies]
++
++Forwards every argument after the command name straight through to core.src.auto_update's own
++argparse (no `--` separator needed), same pattern as download_firms and predict_countries.
++
++Idempotent daily refresh: pull new NASA FIRMS NRT data since the last run, re-harmonize, and
++refresh the country forecast -- but only once per UTC day (core.src.auto_update). Schedule it
++once a day (cron / Task Scheduler) or run it by hand any time; re-running the same day is a
++no-op unless --force is given.
++"""
++import sys
++
++from django.core.management.base import BaseCommand
++
++from core.src import auto_update
++
++
++class Command(BaseCommand):
++    help = ("Daily idempotent refresh: download_firms (NRT) + preprocess + harmonize + "
++            "predict_countries, at most once per UTC day (core.src.auto_update).")
++
++    def run_from_argv(self, argv):
++        # Hand everything after `manage.py auto_update` to the real argparse untouched,
++        # instead of Django's option parser intercepting it.
++        sys.argv = [argv[0]] + argv[2:]
++        # Django's execute() reads these options, which its own parser would normally supply.
++        self.execute(force_color=False, no_color=False, skip_checks=True)
++
++    def handle(self, *args, **options):
++        auto_update.main()

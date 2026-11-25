@@ -1,6 +1,13 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+load_dotenv(ROOT / ".env")
+
 ROOT = Path(os.getenv("PYRO_DATA_ROOT", Path(__file__).resolve().parents[2]))
 DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"

@@ -487,7 +487,12 @@ def run() -> None:
     modis_path = PROCESSED_DIR / "modis_standardized.csv"
     viirs_path = PROCESSED_DIR / "viirs_standardized.csv"
     clean_stale_temp_dirs(PROCESSED_DIR, ("pyroscope_dedupe_", "pyroscope_stream_"))
-    with tempfile.TemporaryDirectory(prefix="pyroscope_stream_", dir=PROCESSED_DIR) as td:
+    # ignore_cleanup_errors: on Windows an antivirus scanner / OneDrive / the search indexer can hold the
+    # big stage.sqlite open for a moment after we closed it, and deleting it then raises WinError 32 AFTER
+    # every output was already written. A leftover scratch folder is harmless (clean_stale_temp_dirs above
+    # removes it on a later run); failing a finished harmonize over it is not.
+    with tempfile.TemporaryDirectory(prefix="pyroscope_stream_", dir=PROCESSED_DIR,
+                                     ignore_cleanup_errors=True) as td:
         temp = Path(td)
         db_path = temp / "stage.sqlite"
         conn = sqlite3.connect(db_path)

@@ -216,6 +216,7 @@ def api_status(request):
         "anomaly_report": PROCESSED_DIR / "anomaly_report.json",
         "forecast": OUTPUTS_DIR / "forecast_by_country.csv",
         "recent_observations": OUTPUTS_DIR / "recent_by_country.csv",
+        "live_confidence": OUTPUTS_DIR / "live_confidence.json",
     }
 
     available = {
@@ -725,5 +726,106 @@ def api_forecast(request):
     except Exception:
         return error_response(
             "An unexpected error occurred while loading forecasts.",
+            status=500,
+        )
+
+
+# ---------------------------------------------------------
+# 5. LIVE CONFIDENCE API (real-time reading vs our forecast)
+# ---------------------------------------------------------
+
+@require_GET
+def api_confidence(request):
+    """Per-country 'data confidence x%' and 'corroborated confidence y%'.
+
+    Reads live_confidence.json as `manage.py live_confidence` last wrote it (see
+    core/validation/live_confidence.py for exactly what x and y mean). Optional ?country=
+    filters by code or name (case-insensitive).
+    """
+    try:
+        payload = read_json(OUTPUTS_DIR / "live_confidence.json")
+    except FileNotFoundError:
+        return error_response(
+            "live_confidence.json not found. Run `python manage.py predict_countries` "
+            "then `python manage.py live_confidence` (auto_update does both).",
+            status=503,
+        )
+    except ValueError:
+        return error_response("live_confidence.json is not valid JSON.", status=500)
+
+    country = request.GET.get("country", "").strip().casefold()
+    if country:
+        payload = {
+            **payload,
+            "countries": [
+                row for row in payload.get("countries", [])
+                if country in (str(row.get("country", "")).casefold(),
+                               str(row.get("name", "")).casefold())
+            ],
+        }
+    return JsonResponse(payload)
+
+
+# ---------------------------------------------------------
+# 6. ANOMALIES & EXPLANATION API
+# ---------------------------------------------------------
+
+@require_GET
+def api_anomalies(request):
+    """Global daily-FRP anomaly episodes, typical critical burning windows, realised season
+    windows per year, and the explanatory report `detect_anomalies` writes (core.src.anomaly).
+
+    This is a single GLOBAL signal (calendar_daily.csv is world-wide), not per-country or
+    per-region -- core.src.anomaly has no concept of an area of interest.
+
+    Optional ?days=N (default 400, max 4000) trims the `daily` series to the most recent N
+    days, so the response stays a reasonable size; `report`, `events`, `windows` and `seasons`
+    are always returned in full since they are small.
+    """
+    try:
+        report = read_json(PROCESSED_DIR / "anomaly_report.json")
+
+        days = int(request.GET.get("days", 400))
+        if not 1 <= days <= 4000:
+            raise ValueError("days must be between 1 and 4000.")
+
+        events = read_csv(PROCESSED_DIR / "anomaly_events.csv")
+        windows = read_csv(PROCESSED_DIR / "critical_windows.csv")
+        seasons = read_csv(PROCESSED_DIR / "season_by_year.csv")
+
+        daily = read_csv(PROCESSED_DIR / "anomalies_daily.csv")
+        daily["date"] = pd.to_datetime(daily["date"], errors="coerce")
+        daily = daily.dropna(subset=["date"]).sort_values("date")
+        daily_total_days = len(daily)
+        daily = daily.tail(days)
+        daily["date"] = daily["date"].dt.strftime("%Y-%m-%d")
+        daily_columns = [c for c in ["date", "frp_mw", "valid", "status", "baseline_mw",
+                                     "ratio_to_baseline", "z", "flag"] if c in daily.columns]
+
+        return JsonResponse({
+            "success": True,
+            "scope": "global (calendar_daily.csv has no area-of-interest breakdown)",
+            "report": report,
+            "events": records_to_json(events),
+            "windows": records_to_json(windows),
+            "seasons": records_to_json(seasons),
+            "daily": records_to_json(daily[daily_columns]),
+            "daily_days_returned": int(len(daily)),
+            "daily_total_days": int(daily_total_days),
+        })
+
+    except FileNotFoundError as exc:
+        return error_response(
+            f"Required pipeline output is missing: {exc}. Run `python manage.py detect_anomalies` "
+            "(needs harmonize to have already run, and at least 2 years of valid calendar days).",
+            status=503,
+        )
+
+    except ValueError as exc:
+        return error_response(str(exc))
+
+    except Exception:
+        return error_response(
+            "An unexpected error occurred while loading anomalies.",
             status=500,
         )

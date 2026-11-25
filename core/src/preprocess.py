@@ -164,7 +164,9 @@ def process_sensor(label, keyword, out_path):
     daily_counts = {}  # bounded by number of days x satellites, not number of detections
     clean_stale_temp_dirs(PROCESSED_DIR, ("pyroscope_dedupe_", "pyroscope_stream_"))
     # Deduplication state lives on disk: a global uint64 NumPy set grows with the entire archive.
-    dedupe_tmp = tempfile.TemporaryDirectory(prefix="pyroscope_dedupe_", dir=PROCESSED_DIR) if DEDUPE else None
+    # ignore_cleanup_errors: see harmonize_streaming.run() -- a briefly locked scratch file on Windows must not fail the run
+    dedupe_tmp = (tempfile.TemporaryDirectory(prefix="pyroscope_dedupe_", dir=PROCESSED_DIR,
+                                              ignore_cleanup_errors=True) if DEDUPE else None)
     dedupe_db = sqlite3.connect(Path(dedupe_tmp.name) / "seen.sqlite") if dedupe_tmp else None
     if dedupe_db is not None:
         dedupe_db.execute("PRAGMA journal_mode=WAL")
