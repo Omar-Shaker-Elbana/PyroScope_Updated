@@ -64,6 +64,17 @@ def main():
         )
 
     fc = cm.forecast_latest(art["models"], wide, art["meta"], art["thresholds"], art["target"], art["horizons"])
+    skipped = cm.short_history_countries(wide)
+    if skipped:
+        names = [art["meta"].get(c, {}).get("name", c) for c in skipped]
+        print(f"\nNOTE: {len(skipped)} of {wide.shape[1]} countries have under {cm.MIN_HISTORY_DAYS} days of data since "
+              f"their first detection, so they get NO forecast (an earlier regional archive plus recent global "
+              f"files leaves them without real history): {', '.join(names[:12])}{' ...' if len(names) > 12 else ''}")
+    n_cap = int((fc["forecast_quality"] == "capped").sum())
+    if n_cap:
+        print(f"\nWARNING: {n_cap} forecast rows exceeded {cm.CAP_MULT:g}x the country's own last-year maximum and "
+              f"were capped (forecast_quality = capped). The saved model is unstable: retrain it with "
+              f"`python manage.py train_countries`.")
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     fc.to_csv(out / "forecast_by_country.csv", index=False)

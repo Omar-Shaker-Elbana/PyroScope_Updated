@@ -15,10 +15,24 @@ The two numbers (all inputs are files already written by the pipeline; nothing i
 x  data_confidence_pct      Trust in the real-time reading ITSELF, before looking at any forecast.
                             = STATUS_FACTOR[harmonized_status of that day]
                               * TRUST_FACTOR[core.validation.confidence's harmonization flag]
-                            i.e. a complete, VIIRS-observed day on a well-validated MODIS scale
-                            scores high; a partial day, or a day the reference VIIRS satellite did
-                            not observe (e.g. everything after Suomi NPP's 2026-11-02 retirement),
-                            or a LOW-trust MODIS k, scores lower.
+                              * COVERAGE_FACTOR[did THIS country's own area have a reference-VIIRS
+                                cell that day?]
+                            The first two factors are the same for every country on a given day --
+                            they describe the GLOBAL harmonization run, not any one country's data
+                            (see core.validation.confidence.harmonization_confidence's own
+                            docstring). COVERAGE_FACTOR is what actually varies x by country: it
+                            checks calendar_cells.csv for a reference-satellite cell inside that
+                            country's own bounding box (core.forecast.legacy_hotsync_data's cached
+                            Natural Earth borders) on the reading day, independent of the global
+                            status. A country whose own area had no reference-satellite detection
+                            that day scores lower, even on a day the global status calls "measured"
+                            from activity elsewhere. This is a bounding-box check, not a true
+                            point-in-polygon one (consistent with api_region's own approximation),
+                            so a large or irregularly-shaped country can register coverage from a
+                            cell just outside its real border. A country whose territory crosses the
+                            antimeridian (e.g. Russia, Fiji) gets a bounding box spanning the full
+                            -180..180 longitude range, so its coverage check degenerates to a
+                            latitude-band test for that country only.
 
 R  forecast_track_record    How often past forecasts for this country landed inside their own
                             10-90% band when the real data arrived (a Beta-binomial average that
@@ -28,7 +42,11 @@ R  forecast_track_record    How often past forecasts for this country landed ins
 
 A  agreement                How well THIS reading matches what we had predicted for that day:
                             1.0 inside the predicted band, falling linearly to 0 one band-width
-                            outside it.
+                            outside it. A band that is absurdly wide (upper bound more than
+                            BAND_MAX_RATIO times anything recently observed for that country) or
+                            that predict_countries had to cap (forecast_quality = capped) is NOT
+                            informative -- it would "contain" any reading -- so it earns A = 0 and
+                            counts as a miss in the track record.
 
 y  corroborated_confidence_pct
                             = x + (100 - x) * EVIDENCE_WEIGHT * R * A
@@ -79,7 +97,10 @@ EVIDENCE_WEIGHT = 0.5      # forecast shares its data source with the reading ->
 SHRINK_K = 20              # pseudo-observations behind the held-out prior
 DEFAULT_PRIOR = 0.80       # nominal coverage of the p10-p90 band
 TRACK_RECORD_DAYS = 120    # only recent scored forecasts count toward R
+COVERAGE_FACTOR = {True: 1.00, False: 0.60}   # this country's own bbox had/had not a reference-VIIRS cell that day
 KEEP_HISTORY_DAYS = 400
+BAND_MAX_RATIO = 10.0      # upper bound above this x the country's recent observed max = too loose to mean anything
+INFO_FLOOR = 10.0          # ... measured against at least this much, so near-zero countries are not unfairly judged
 
 
 def _out_dir() -> Path:
@@ -101,7 +122,7 @@ def archive_forecast(forecast_csv: str | Path | None = None,
     missing = set(keep) - set(fc.columns)
     if missing:
         raise ValueError(f"{forecast_csv.name} is missing column(s): {sorted(missing)}")
-    new = fc[keep + ([c for c in ("name", "target") if c in fc.columns])].copy()
+    new = fc[keep + ([c for c in ("name", "target", "forecast_quality") if c in fc.columns])].copy()
     # issued_on = the last observed day the forecast was built from (target date minus horizon)
     new["issued_on"] = new["date"] - pd.to_timedelta(new["horizon_days"].astype(int), unit="D")
 
@@ -144,8 +165,13 @@ def score_history(history: pd.DataFrame, observed: pd.DataFrame) -> pd.DataFrame
     """Archived forecasts joined to the observations that have since arrived."""
     s = history.merge(observed, on=["country", "date"], how="inner")
     if s.empty:
-        return s.assign(in_band=pd.Series(dtype=bool), abs_error=pd.Series(dtype=float))
-    s["in_band"] = (s["observed"] >= s["low_p10"]) & (s["observed"] <= s["high_p90"])
+        return s.assign(in_band=pd.Series(dtype=bool), informative=pd.Series(dtype=bool),
+                        abs_error=pd.Series(dtype=float))
+    scale = observed.groupby("country")["observed"].max().rename("obs_scale")
+    s = s.merge(scale, on="country", how="left")
+    quality = s["forecast_quality"].fillna("ok") if "forecast_quality" in s.columns else "ok"
+    s["informative"] = (s["high_p90"] <= BAND_MAX_RATIO * np.maximum(s["obs_scale"], INFO_FLOOR)) & (quality != "capped")
+    s["in_band"] = (s["observed"] >= s["low_p10"]) & (s["observed"] <= s["high_p90"]) & s["informative"]
     s["abs_error"] = (s["observed"] - s["predicted"]).abs()
     return s
 
@@ -164,8 +190,50 @@ def forecast_track_record(scored: pd.DataFrame, prior: float = DEFAULT_PRIOR,
 
 
 # --------------------------------------------------------------------------- x and y
-def data_confidence_pct(status: str, trust_flag: str) -> float:
-    return 100.0 * STATUS_FACTOR.get(status, DEFAULT_STATUS_FACTOR) * TRUST_FACTOR.get(trust_flag, 0.70)
+def _country_bboxes() -> dict | None:
+    """{country_code: (west, south, east, north)}, unioned across every polygon part of that
+    country, from the Natural Earth borders train_countries already downloads and caches
+    (core.forecast.legacy_hotsync_data.load_countries). None if borders are unavailable --
+    geopandas missing, or no cached file and no network for a first-ever download -- so callers
+    fall back to treating coverage as unknown rather than failing."""
+    try:
+        from core.forecast.legacy_hotsync_data import load_countries
+        countries = load_countries()
+        b = countries.geometry.bounds
+        b["country"] = countries["country"].values
+        g = b.groupby("country").agg(west=("minx", "min"), south=("miny", "min"),
+                                     east=("maxx", "max"), north=("maxy", "max"))
+        return {c: (r.west, r.south, r.east, r.north) for c, r in g.iterrows()}
+    except Exception:
+        return None
+
+
+def _viirs_coverage_by_country(bboxes: dict, days, reference_satellite: str,
+                               cells_csv: str | Path | None = None) -> dict:
+    """{(country, pandas.Timestamp day): bool} -- did that country's own bounding box contain at
+    least one REFERENCE-satellite cell on that day? Reads only the given days' rows. {} (treated
+    as "unknown" by callers, not "no coverage") if calendar_cells.csv or `reference_satellite`
+    is unavailable."""
+    if not bboxes or not reference_satellite:
+        return {}
+    cells_csv = Path(cells_csv) if cells_csv else Path(PROCESSED_DIR) / "calendar_cells.csv"
+    if not cells_csv.exists():
+        return {}
+    wanted = {pd.Timestamp(d).normalize() for d in days}
+    cells = pd.read_csv(cells_csv, usecols=["date", "source_satellite", "cell_lat", "cell_lon"], parse_dates=["date"])
+    cells["date"] = cells["date"].dt.normalize()
+    cells = cells[(cells["source_satellite"] == reference_satellite) & (cells["date"].isin(wanted))]
+    out = {}
+    for day, day_cells in cells.groupby("date"):
+        lat, lon = day_cells["cell_lat"].to_numpy(), day_cells["cell_lon"].to_numpy()
+        for country, (west, south, east, north) in bboxes.items():
+            out[(country, day)] = bool(((lat >= south) & (lat <= north) & (lon >= west) & (lon <= east)).any())
+    return out
+
+
+def data_confidence_pct(status: str, trust_flag: str, has_coverage: bool = True) -> float:
+    return (100.0 * STATUS_FACTOR.get(status, DEFAULT_STATUS_FACTOR) * TRUST_FACTOR.get(trust_flag, 0.70)
+            * COVERAGE_FACTOR[bool(has_coverage)])
 
 
 def corroborated_pct(x: float, track_record: float, agreement: float) -> float:
@@ -214,17 +282,30 @@ def build_live_confidence(write: bool = True) -> dict:
 
     # headline reading = newest COMPLETE day (today is almost always a partial day)
     complete_days = sorted(d for d in observed["date"].unique() if status_by_day.get(d) != "partial_day")
-    rows = []
+    reading_day = {}
     for c in countries:
         obs_c = observed[observed["country"] == c]
         days_c = obs_c[obs_c["date"].isin(complete_days)] if complete_days else obs_c
         if days_c.empty:
             days_c = obs_c
-        d = days_c["date"].max()
-        reading = float(days_c.loc[days_c["date"] == d, "observed"].iloc[0])
+        reading_day[c] = days_c["date"].max()
+
+    # One batched pass over calendar_cells.csv for every country/day needed, rather than once
+    # per country: see data_confidence_pct's COVERAGE_FACTOR / this module's docstring.
+    reference_satellite = mapping.get("reference_viirs_satellite")
+    bboxes = _country_bboxes() if reference_satellite else None   # avoid an unneeded download/load
+    coverage = (_viirs_coverage_by_country(bboxes, set(reading_day.values()), reference_satellite)
+                if bboxes else {})
+
+    rows = []
+    for c in countries:
+        obs_c = observed[observed["country"] == c]
+        d = reading_day[c]
+        reading = float(obs_c.loc[obs_c["date"] == d, "observed"].iloc[0])
         status = status_by_day.get(d, "unknown")
         flag = hc.loc[c, "confidence_flag"]
-        x = data_confidence_pct(status, flag)
+        has_coverage = coverage.get((c, pd.Timestamp(d).normalize()))   # True/False if known, None if not
+        x = data_confidence_pct(status, flag, True if has_coverage is None else has_coverage)
 
         n = int(record.loc[c, "n_scored"]) if record is not None and c in record.index else 0
         R = float(record.loc[c, "track_record"]) if n else prior
@@ -234,14 +315,21 @@ def build_live_confidence(write: bool = True) -> dict:
             y, A, label, fc_rec = x, None, "no_prior_forecast", None
         else:
             fc_rec = f.iloc[0]   # shortest horizon = the forecast made closest to that day
-            A, label = agreement_score(reading, fc_rec["low_p10"], fc_rec["high_p90"], fc_rec["predicted"])
-            y = corroborated_pct(x, R, A)
-            label = {"within": "within_forecast_range", "above": "above_forecast_range",
-                     "below": "below_forecast_range"}[label]
+            quality = str(fc_rec["forecast_quality"]) if "forecast_quality" in fc_rec.index and pd.notna(fc_rec["forecast_quality"]) else "ok"
+            informative = (float(fc_rec["high_p90"]) <= BAND_MAX_RATIO * max(float(obs_c["observed"].max()), INFO_FLOOR)
+                           and quality != "capped")
+            if not informative:
+                A, label, y = 0.0, "forecast_not_informative", x
+            else:
+                A, label = agreement_score(reading, fc_rec["low_p10"], fc_rec["high_p90"], fc_rec["predicted"])
+                y = corroborated_pct(x, R, A)
+                label = {"within": "within_forecast_range", "above": "above_forecast_range",
+                         "below": "below_forecast_range"}[label]
         rows.append({
             "country": c, "name": names.get(c, c), "date": str(pd.Timestamp(d).date()),
             "observed": round(reading, 2), "harmonized_status": status,
             "harmonization_flag": flag,
+            "own_viirs_coverage": "unknown" if has_coverage is None else ("yes" if has_coverage else "no"),
             "data_confidence_pct": round(x, 1),
             "corroborated_confidence_pct": round(y, 1),
             "agreement": label,
@@ -258,7 +346,7 @@ def build_live_confidence(write: bool = True) -> dict:
     df = pd.DataFrame(rows)
     w = df["observed"].clip(lower=0)
     wmean = (lambda col: float(np.average(df[col], weights=w)) if w.sum() > 0 else float(df[col].mean()))
-    compared = df["agreement"] != "no_prior_forecast"
+    compared = ~df["agreement"].isin(["no_prior_forecast", "forecast_not_informative"])
     result = {
         "success": True,
         "generated_for_date": str(pd.to_datetime(df["date"]).max().date()),
@@ -269,18 +357,23 @@ def build_live_confidence(write: bool = True) -> dict:
             "countries": int(len(df)),
             "countries_with_forecast_comparison": int(compared.sum()),
             "within_forecast_range": int((df["agreement"] == "within_forecast_range").sum()),
+            "forecasts_too_wide_to_use": int((df["agreement"] == "forecast_not_informative").sum()),
             "scored_forecasts_total": int(len(scored)),
             "forecast_history_days": int(history["issued_on"].nunique()),
         },
         "method": {
-            "data_confidence": "STATUS_FACTOR[harmonized_status] x TRUST_FACTOR[harmonization flag] "
-                               "(heuristic index, not a probability)",
+            "data_confidence": "STATUS_FACTOR[harmonized_status] x TRUST_FACTOR[harmonization flag] x "
+                               "COVERAGE_FACTOR[this country's own bbox had a reference-VIIRS cell that "
+                               "day] (heuristic index, not a probability; the first two factors are the "
+                               "same for every country on a given day, only COVERAGE_FACTOR varies by "
+                               "country -- see own_viirs_coverage per country)",
             "forecast_track_record": f"share of past forecasts that landed in their own 10-90% band, "
                                      f"shrunk toward the held-out prior ({prior:.0%}) with k={SHRINK_K}",
             "corroborated": f"x + (100-x) * {EVIDENCE_WEIGHT} * track_record * agreement; "
                             "agreement can raise confidence but never lowers it",
             "caveat": "the forecast is built from the same satellite stream, so agreement is a "
-                      "plausibility check, not independent ground truth",
+                      "plausibility check, not independent ground truth; forecasts whose range is "
+                      "absurdly wide (or were capped as unstable) are ignored rather than counted as agreement",
         },
         "countries": df.sort_values("observed", ascending=False).to_dict(orient="records"),
     }

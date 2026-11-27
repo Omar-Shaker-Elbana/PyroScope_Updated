@@ -45,6 +45,11 @@ def main():
     wide, meta, info = cm.prepare_country_series(
         args.target, args.countries, args.start, args.end, args.min_active_days, args.max_countries)
     print(f"Modelling {wide.shape[1]} countries, {wide.index[0].date()} -> {wide.index[-1].date()}")
+    short = cm.short_history_countries(wide)
+    if short:
+        print(f"  {len(short)} of them have under {cm.MIN_HISTORY_DAYS} days of data since their first detection and "
+              f"are left out of training and forecasting (e.g. a regional archive + global recent files): "
+              f"{', '.join(meta[c]['name'] for c in short[:12])}{' ...' if len(short) > 12 else ''}")
     print(f"  source: {info['source']}; reference VIIRS satellite {info['reference_viirs_satellite']}")
     print(f"  k by MODIS satellite: {json.dumps(info['k_by_modis_satellite'])}")
     if args.target == "activity":

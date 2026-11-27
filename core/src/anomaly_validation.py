@@ -83,6 +83,10 @@ def variant_specs(cal):
         with_low = cal["status"].isin(("measured", "measured_zero", "measured_low_coverage")).to_numpy()
         if (with_low != cal["valid"].to_numpy()).any():
             specs.append(("outage-suspect days re-admitted", "missing data", dict(valid=with_low), False))
+        with_scope = cal["status"].isin(
+            ("measured", "measured_zero", "measured_low_coverage", "scope_expanded")).to_numpy()
+        if (with_scope != cal["valid"].to_numpy()).any() and (with_scope != with_low).any():
+            specs.append(("scope-expanded days re-admitted", "geographic scope", dict(valid=with_scope), False))
     specs.append(("NO seasonal baseline (whole year pooled)", "negative control", dict(window=183), False))
     return specs
 

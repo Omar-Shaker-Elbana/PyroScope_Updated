@@ -18,6 +18,26 @@ from . import hotsync_model as hm
 
 FEATURES_C = hm.FEATURES + ["mean365", "lat", "lon"]
 
+# Guard rails. A pooled Poisson model is only as trustworthy as the history behind each country:
+MIN_HISTORY_DAYS = 730   # a country needs this many days of data SINCE ITS FIRST DETECTION to be modelled
+CAP_MULT = 3.0           # a forecast may not exceed this multiple of the country's own last-365-day maximum
+CAP_FLOOR = 25.0         # ... but never less than this (so quiet countries are not clamped to ~0)
+
+
+def usable_series(y: pd.Series) -> pd.Series:
+    """A country's series from its FIRST DETECTION onward. Zeros before that are usually "not covered", not
+    "no fire" -- e.g. a regional (--bbox) archive followed by global near-real-time files makes every
+    country outside the box look like 11 years of zeros and then a sudden 2026. Training on that teaches
+    the model nonsense (and a log-link Poisson model can run away to astronomically large forecasts)."""
+    y = y.dropna().asfreq("D")
+    pos = y[y > 0]
+    return y.loc[pos.index[0]:] if len(pos) else y.iloc[0:0]
+
+
+def short_history_countries(wide: pd.DataFrame, min_days: int = MIN_HISTORY_DAYS) -> list:
+    """Countries (columns of `wide`) with too little real history to model or forecast."""
+    return [c for c in wide.columns if len(usable_series(wide[c])) < min_days]
+
 
 def select_countries(wide: pd.DataFrame, min_active_days: int = 60, max_countries: int = 120):
     """Keep countries with enough fire history, biggest first."""
@@ -44,8 +64,8 @@ def build_panel(wide: pd.DataFrame, meta: dict, horizons=hm.HORIZONS, stride: in
     """Stack rows for every country. `stride` thins training rows (every n-th day)."""
     frames = []
     for code in wide.columns:
-        y = wide[code].dropna().asfreq("D")
-        if len(y) < 120:
+        y = usable_series(wide[code])
+        if len(y) < MIN_HISTORY_DAYS:
             continue
         rows = hm.build_rows(y, horizons)
         mean365 = y.rolling(365, min_periods=90).mean()
@@ -107,6 +127,13 @@ def evaluate_panel(wide, meta, target, test_days=365, stride=3, horizons=hm.HORI
 def forecast_latest(models, wide, meta, thr, target, horizons=hm.HORIZONS) -> pd.DataFrame:
     now = build_panel(wide, meta, horizons, latest_only=True)
     out = now.join(hm.predict(models, now, FEATURES_C))
+    # Guard: a forecast far above anything the country produced in the last year is a model failure, not
+    # a prediction. Clamp it and say so (forecast_quality) instead of publishing it.
+    ref = {c: usable_series(wide[c]).tail(365).max() for c in out["country"].unique()}
+    cap = out["country"].map(lambda c: max(CAP_MULT * float(np.nan_to_num(ref[c])), CAP_FLOOR)).astype(float)
+    was_capped = out["pred"] > cap
+    for col in ("pred", "low", "high"):
+        out[col] = np.minimum(out[col], cap)
     last_by_country = {c: wide[c].dropna().index[-1] for c in wide.columns}
     out["date"] = [last_by_country[c] + pd.Timedelta(days=int(h)) for c, h in zip(out["country"], out["h"])]
     return pd.DataFrame({
@@ -121,6 +148,7 @@ def forecast_latest(models, wide, meta, thr, target, horizons=hm.HORIZONS) -> pd
         "typical": out["clim_mean"].round(2).values,
         "busy_day": [bool(p >= thr[c]) for c, p in zip(out["country"], out["pred"])],
         "target": target,
+        "forecast_quality": np.where(was_capped.values, "capped", "ok"),
     }).sort_values(["country", "horizon_days"]).reset_index(drop=True)
 
 

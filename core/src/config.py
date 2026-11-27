@@ -129,6 +129,12 @@ CRIT_PCT = float(os.getenv("PYRO_CRIT_PCT", 75))            # percentile of the 
 # Statistical validation of the anomaly episodes (anomaly_validation.py). Set PYRO_ANOM_VALIDATE=0 to skip it.
 ANOM_VALIDATE = os.getenv("PYRO_ANOM_VALIDATE", "1") != "0"
 ANOM_INCLUDE_LOW_COVERAGE = os.getenv("PYRO_ANOM_INCLUDE_LOW_COVERAGE", "0") == "1"  # keep outage-suspect days in the analysis
+# A day whose calendar_cells.csv geographic footprint is this many times the whole record's median
+# footprint is a scope change (e.g. a --bbox archive followed by global NRT files), not a bigger
+# fire day, and is excluded from scoring/baseline like measured_low_coverage above; set
+# PYRO_ANOM_INCLUDE_SCOPE_CHANGED=1 to keep such days in the analysis instead.
+ANOM_SCOPE_RATIO = float(os.getenv("PYRO_ANOM_SCOPE_RATIO", 8.0))
+ANOM_INCLUDE_SCOPE_CHANGED = os.getenv("PYRO_ANOM_INCLUDE_SCOPE_CHANGED", "0") == "1"
 # PYRO_ANOM_DETREND=1 removes each year's median level before scoring. Off by default (keeps the baseline definition
 # of earlier runs), but anomaly_validation.json reports the annual-level trend and the effect of removing it: a
 # significant trend makes the leave-one-year-out baseline too low for early years and too high for late years.

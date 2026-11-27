@@ -8,9 +8,13 @@ What it does
     `measured_zero`. Everything else is MISSING, never zero: days the VIIRS file does not contain
     (`viirs_not_observed`), the two partial days at the window edges (`partial_day`), days that look like
     partial outages (`measured_low_coverage`, excluded unless PYRO_ANOM_INCLUDE_LOW_COVERAGE=1, because a day that lost
-    overpasses is biased low and would be flagged as a 'low' anomaly) and, when the calendar was built with a cloud file
-    (PYRO_CLOUD_FILE), days that were observed but obscured by cloud with no detection (`observed_obscured`: not a
-    confirmed zero, so never scored). MODIS is never substituted for VIIRS.
+    overpasses is biased low and would be flagged as a 'low' anomaly), days whose calendar_cells.csv geographic
+    footprint suddenly changed (`scope_expanded`, excluded unless PYRO_ANOM_INCLUDE_SCOPE_CHANGED=1 -- see
+    flag_scope_change below; e.g. a regional --bbox archive followed by global near-real-time files makes "the
+    world got busier" indistinguishable from "we started looking at more of the world" unless these days are kept
+    out of the comparison) and, when the calendar was built with a cloud file (PYRO_CLOUD_FILE), days that were
+    observed but obscured by cloud with no detection (`observed_obscured`: not a confirmed zero, so never scored).
+    MODIS is never substituted for VIIRS.
  2. Anomalies: for every day, a robust baseline (median and MAD of log1p FRP) taken from the
     same time of year (+- PYRO_ANOM_WINDOW days) in ALL OTHER YEARS (leave-one-year-out, so an
     extreme year cannot hide itself). robust z = (x - median) / (1.4826 * MAD).
@@ -39,7 +43,7 @@ import pandas as pd
 from core.src.config import ensure_dirs
 from core.src.config import (
     PROCESSED_DIR, ANOM_MIN_YEARS, ANOM_Z, ANOM_WINDOW_DAYS, CRIT_PCT, ANOM_VALIDATE, ANOM_INCLUDE_LOW_COVERAGE,
-    ANOM_DETREND,
+    ANOM_DETREND, ANOM_SCOPE_RATIO, ANOM_INCLUDE_SCOPE_CHANGED,
 )
 from core.src import hotsync_anomaly
 
@@ -94,6 +98,45 @@ def load_series() -> pd.DataFrame:
     cal["doy"] = doy365(cal.index.to_series())
     cal["year"] = cal.index.year
     return cal
+
+
+def compute_daily_footprint(path=None) -> pd.Series:
+    """Per-day geographic footprint (lon_span_deg x lat_span_deg of that day's active cells) from
+    calendar_cells.csv -- a coarse, sensor-agnostic proxy for how much of the globe that day's
+    upstream raw FIRMS files actually covered, independent of how much fire was burning.
+    Empty Series if calendar_cells.csv is missing (callers then skip scope-change exclusion
+    entirely, the same fail-open behaviour as a missing frp_mapping.json elsewhere)."""
+    path = PROCESSED_DIR / "calendar_cells.csv" if path is None else path
+    if not path.exists():
+        return pd.Series(dtype=float)
+    cells = pd.read_csv(path, usecols=["date", "cell_lat", "cell_lon"], parse_dates=["date"])
+    if cells.empty:
+        return pd.Series(dtype=float)
+    g = cells.groupby("date")
+    footprint = (g["cell_lon"].max() - g["cell_lon"].min()) * (g["cell_lat"].max() - g["cell_lat"].min())
+    return footprint.rename("footprint_deg2")
+
+
+def flag_scope_change(cal: pd.DataFrame, footprint: pd.Series, ratio: float = ANOM_SCOPE_RATIO,
+                      min_known_days: int = 180) -> pd.Series:
+    """True for days whose footprint is `ratio`x+ the MEDIAN footprint across the whole record --
+    i.e. a day the raw files' geographic coverage changed (an archive downloaded with --bbox
+    followed by global near-real-time files, say), not a day more of an unchanged area caught
+    fire. A real fire season widens a day's footprint gradually and only somewhat; a scope change
+    widens it by an order of magnitude and then STAYS wide, which a ratio-vs-whole-record-median
+    test catches without needing to know when or where the change happened, or configure it by
+    hand -- and it self-resolves once history and present cover the same geography (the ratio
+    stops being exceeded for anyone once the whole record is on one consistent footprint). All-
+    False if footprint is missing for most of the record (`min_known_days`) or the record's
+    footprint is degenerate (median <= 0)."""
+    f = footprint.reindex(cal.index)
+    known = f.notna()
+    if int(known.sum()) < min_known_days:
+        return pd.Series(False, index=cal.index)
+    typical = float(f[known].median())
+    if typical <= 0:
+        return pd.Series(False, index=cal.index)
+    return (f > ratio * typical).fillna(False)
 
 
 # --------------------------------------------------------------------------- anomalies
@@ -330,6 +373,19 @@ def plot(df, events, windows, sm, season_start_doy, seasons):
 def main():
     ensure_dirs()
     cal = load_series()
+
+    footprint = compute_daily_footprint()
+    scope_changed = flag_scope_change(cal, footprint)
+    n_scope_changed = 0
+    if scope_changed.any() and not ANOM_INCLUDE_SCOPE_CHANGED:
+        newly_excluded = cal["valid"] & scope_changed
+        n_scope_changed = int(newly_excluded.sum())
+        cal.loc[newly_excluded, "status"] = "scope_expanded"
+        cal.loc[scope_changed, "valid"] = False
+        cal.loc[scope_changed, "value"] = np.nan
+        # value_measured (the pre-exclusion value) is left untouched, same as measured_low_coverage
+        # above -- it's what lets anomaly_validation re-admit these days as one of its variants.
+
     n_valid = int(cal["valid"].sum())
     n_years = n_valid / 365.25
     years_present = int(cal.loc[cal["valid"], "year"].nunique())
@@ -345,7 +401,13 @@ def main():
     by_status = {k: int(v) for k, v in cal["status"].value_counts().items()}
     excluded = int(len(cal) - n_valid)
     if excluded > 0.05 * len(cal):
-        reasons.append(f"{excluded / len(cal):.0%} of days are not usable (not observed, partial, outage-suspect or cloud-obscured)")
+        reasons.append(f"{excluded / len(cal):.0%} of days are not usable (not observed, partial, outage-suspect, scope-expanded or cloud-obscured)")
+    if n_scope_changed:
+        reasons.append(
+            f"{n_scope_changed} recent day(s) excluded: their calendar_cells.csv geographic footprint is "
+            f">= {ANOM_SCOPE_RATIO:g}x the record's typical footprint, most likely a regional archive "
+            "followed by global near-real-time files rather than a real change in burning extent -- see "
+            "scope_expanded_days_excluded")
     reliable = not reasons
 
     df = score(cal)
@@ -381,6 +443,7 @@ def main():
         "valid_days": n_valid, "missing_days": excluded, "years_of_valid_days": round(n_years, 2),
         "days_by_status": by_status,
         "outage_suspect_days_excluded": 0 if ANOM_INCLUDE_LOW_COVERAGE else by_status.get("measured_low_coverage", 0),
+        "scope_expanded_days_excluded": n_scope_changed,
         **({"cloud_obscured_days_excluded": by_status["observed_obscured"]} if by_status.get("observed_obscured") else {}),
         "anomalous_days_high": int((df["flag"] == "high").sum()),
         "anomalous_days_low": int((df["flag"] == "low").sum()),
@@ -398,8 +461,10 @@ def main():
         },
         "caveat": ("An episode is a statistical candidate: a z-score does not prove that an event is scientifically "
                    "exceptional (see `robustness` and anomaly_validation.json). 'low' flags can be satellite or "
-                   "ground-segment outages, not less fire; days that look like partial outages are excluded. A single "
-                   "reference sensor family is assumed; the trend is not removed."),
+                   "ground-segment outages, not less fire; days that look like partial outages are excluded. Days "
+                   "whose raw-file geographic coverage changed (scope_expanded_days_excluded) are also excluded, since "
+                   "a wider footprint looks identical to more fire without this check. A single reference sensor "
+                   "family is assumed; the trend is not removed."),
     }
     (PROCESSED_DIR / "anomaly_report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

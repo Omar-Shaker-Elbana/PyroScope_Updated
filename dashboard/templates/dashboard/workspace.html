@@ -433,7 +433,7 @@ render();
 (()=>{
 const $=s=>document.querySelector(s),el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
 const pct=v=>Number.isFinite(v)?v.toFixed(1).replace(/\.0$/,'')+'%':'—';
-const LBL={within_forecast_range:['inside forecast range','ok'],above_forecast_range:['above forecast range','hi'],below_forecast_range:['below forecast range','lo'],no_prior_forecast:['no earlier forecast yet','na']};
+const LBL={within_forecast_range:['inside forecast range','ok'],above_forecast_range:['above forecast range','hi'],below_forecast_range:['below forecast range','lo'],no_prior_forecast:['no earlier forecast yet','na'],forecast_not_informative:['forecast too wide to use','na']};
 (async()=>{
  const msg=$('#cfMsg');
  try{
