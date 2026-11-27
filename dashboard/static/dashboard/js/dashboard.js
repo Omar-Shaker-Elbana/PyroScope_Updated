@@ -279,6 +279,15 @@ const KEYK='hotsync.key',AIK='hotsync.ai';
 const store=(k,v)=>{try{$('#rem').checked?localStorage.setItem(k,v):localStorage.removeItem(k)}catch(e){}};
 try{const k=localStorage.getItem(KEYK),a=localStorage.getItem(AIK);if(k){$('#key').value=k;$('#rem').checked=true}if(a){$('#aik').value=a;$('#rem').checked=true}}catch(e){}
 $('#key').onchange=$('#aik').onchange=$('#rem').onchange=()=>{store(KEYK,$('#key').value.trim());store(AIK,$('#aik').value.trim())};
+/* Share the typed key with the server. The server uses it (in memory only) for its automatic daily
+   update, but only when it has no FIRMS_MAP_KEY of its own; the live feed below still uses it directly. */
+const csrf=()=>decodeURIComponent((document.cookie.match(/(?:^|; )csrftoken=([^;]*)/)||[])[1]||'');
+function keyNote(j){const n=$('#keynote');if(!n)return;
+ n.textContent=!j||!j.success?(j&&j.error)||'':j.active==='env'?'The server already has its own FIRMS key; yours is used only for this live feed.':j.active==='user'?'Your key is also used by the server for its automatic daily update (kept in server memory only, cleared on restart).':''}
+async function pushKey(){const k=$('#key').value.trim();if(!k)return;
+ try{const r=await fetch('/api/dashboard/firms-key/',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json','X-CSRFToken':csrf()},body:JSON.stringify({key:k})});keyNote(await r.json().catch(()=>null))}catch(e){}}
+$('#key').addEventListener('change',pushKey);
+fetch('/api/dashboard/firms-key/',{credentials:'same-origin'}).then(r=>r.json()).then(keyNote).catch(()=>{});
 function stopLive(){const was=LIVE;LIVE=false;clearInterval(LT);LT=0;if(was)$('#lst').textContent='Live feed stopped. Data already loaded stays on screen.'}
 async function liveFetch(){
  if(!LIVE||!AOI)return;const A=AOI,k=$('#key').value.trim(),cp=(v,m)=>Math.max(-m,Math.min(m,v)).toFixed(3),
@@ -302,7 +311,7 @@ async function liveFetch(){
  }catch(e){st.textContent=e instanceof TypeError?'Could not reach NASA FIRMS (offline, or the browser blocked the request).':'FIRMS update was not applied: '+e.message}}
 function armLive(){clearInterval(LT);const m=+$('#ivl').value;LT=m?setInterval(liveFetch,m*6e4):0}
 $('#go').onclick=()=>{if(!$('#key').value.trim()){$('#lst').textContent='Paste your FIRMS MAP_KEY first (free, takes a minute).';return}
- store(KEYK,$('#key').value.trim());LIVE=true;REAL=true;ROWS=[];LSEEN.clear();YS=[new Date().getUTCFullYear()];armLive();
+ store(KEYK,$('#key').value.trim());pushKey();LIVE=true;REAL=true;ROWS=[];LSEEN.clear();YS=[new Date().getUTCFullYear()];armLive();
  if(AOI)liveFetch();else{$('#lst').textContent='Live feed ready. Click the map to choose an area.';heat();analyze()}};
 $('#stop').onclick=stopLive;$('#ivl').onchange=()=>{if(LIVE)armLive()};
 

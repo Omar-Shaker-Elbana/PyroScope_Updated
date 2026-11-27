@@ -14,6 +14,12 @@ urlpatterns = [
 ),
 
 path(
+    "api/dashboard/firms-key/",
+    api_views.api_firms_key,
+    name="api-firms-key",
+),
+
+path(
     "api/dashboard/map/",
     api_views.api_map,
     name="api-map",

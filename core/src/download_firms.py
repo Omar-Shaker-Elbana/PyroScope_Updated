@@ -2,6 +2,7 @@
 
 You need a free MAP_KEY: https://firms.modaps.eosdis.nasa.gov/api/map_key/
 Pass it with --key or the FIRMS_MAP_KEY environment variable (it is never printed or written to disk).
+An explicit --key wins; otherwise FIRMS_MAP_KEY is used.
 
 Examples (PowerShell, from the project folder):
     $env:FIRMS_MAP_KEY="your_key"
@@ -28,7 +29,7 @@ import urllib.error
 import urllib.request
 from datetime import date, timedelta
 
-from core.src.config import RAW_DIR
+from core.src.config import RAW_DIR, resolve_firms_key
 
 BASE_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 # First date with archive data per source (FIRMS archive page).
@@ -132,7 +133,7 @@ def download_range(key, source, area, d0, d1, out_path, base_url):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--key", default=os.getenv("FIRMS_MAP_KEY"), help="FIRMS MAP_KEY (or env FIRMS_MAP_KEY)")
+    ap.add_argument("--key", default=None, help="FIRMS MAP_KEY (or env FIRMS_MAP_KEY)")
     ap.add_argument("--start", required=True, help="YYYY-MM-DD (inclusive)")
     ap.add_argument("--end", required=True, help="YYYY-MM-DD (inclusive)")
     ap.add_argument("--bbox", default=None, help="west,south,east,north (default: global)")
@@ -140,6 +141,7 @@ def main():
     ap.add_argument("--force", action="store_true", help="re-download files that already exist")
     ap.add_argument("--base-url", default=BASE_URL, help=argparse.SUPPRESS)
     a = ap.parse_args()
+    a.key = a.key or resolve_firms_key()
     if not a.key:
         sys.exit("No MAP_KEY. Get one at https://firms.modaps.eosdis.nasa.gov/api/map_key/ "
                  "and pass --key or set FIRMS_MAP_KEY.")

@@ -59,13 +59,17 @@ from pathlib import Path
 
 import pandas as pd
 
-from core.src.config import PROCESSED_DIR, OUTPUTS_DIR, ensure_dirs
+from core.src.config import PROCESSED_DIR, OUTPUTS_DIR, ensure_dirs, resolve_firms_key
 
 # core/src/auto_update.py -> parents[2] is the repo root (where manage.py lives), the same
 # depth config.py uses for its default ROOT -- computed independently of PYRO_DATA_ROOT so
 # this still finds manage.py even when PYRO_DATA_ROOT points data at a different folder.
 MANAGE_PY = Path(__file__).resolve().parents[2] / "manage.py"
 STATE_FILE_NAME = "auto_update_state.json"
+
+
+class MissingFirmsKey(RuntimeError):
+    """No FIRMS MAP_KEY is available (neither FIRMS_MAP_KEY nor one entered by the user)."""
 
 # SP (standard, science-quality) archive sources and their NRT (near-real-time) counterparts.
 # _SP lags real time by ~5 months (README section 7), so the daily top-up has to use _NRT,
@@ -116,10 +120,14 @@ def _last_calendar_date():
     return dates.max().date()
 
 
-def _run_step(args: list[str]) -> None:
-    """Run one `python manage.py <args>` step, streaming its output, and raise if it fails."""
+def _run_step(args: list[str], firms_key: str | None = None) -> None:
+    """Run one `python manage.py <args>` step, streaming its output, and raise if it fails.
+
+    `firms_key` is handed to the child through its environment (FIRMS_MAP_KEY), never on the
+    command line, so it cannot show up in the echoed command or in the process list."""
     print(f"\n$ {sys.executable} manage.py {' '.join(args)}", flush=True)
-    subprocess.run([sys.executable, str(MANAGE_PY)] + args, check=True, cwd=str(MANAGE_PY.parent))
+    env = {**os.environ, "FIRMS_MAP_KEY": firms_key} if firms_key else None
+    subprocess.run([sys.executable, str(MANAGE_PY)] + args, check=True, cwd=str(MANAGE_PY.parent), env=env)
 
 
 def _run_optional_step(command: str, context: str) -> None:
@@ -133,14 +141,19 @@ def _run_optional_step(command: str, context: str) -> None:
 
 
 def run(force=False, sources=None, bbox=None, initial_lookback_days=10,
-        skip_predict=False, with_anomalies=True) -> bool:
+        skip_predict=False, with_anomalies=True, firms_key=None) -> bool:
     """Do one idempotent refresh attempt -- the logic shared by main() (the CLI) and the
     background scheduler below. Returns True if new FIRMS data was actually pulled, False if
     the calendar already reached today (a short-circuit on the download/preprocess/harmonize
     steps only -- predict_countries is still (re)attempted either way, unless skip_predict or
     no trained model). Returns False without doing anything if auto_update already completed
     today. Raises RuntimeError if a step fails (today is left unmarked, so the next attempt
-    retries it)."""
+    retries it).
+
+    The FIRMS MAP_KEY comes from the FIRMS_MAP_KEY environment variable; if that is not set, from
+    `firms_key` or the key a user entered in the dashboard (core.src.config.resolve_firms_key).
+    It is passed to the download step through the child's environment and is never printed or
+    stored. Raises MissingFirmsKey (before running anything) if new data is needed and there is none."""
     today = datetime.now(timezone.utc).date()
     state = _load_state()
 
@@ -163,6 +176,11 @@ def run(force=False, sources=None, bbox=None, initial_lookback_days=10,
     sources = [NRT_OF.get(s.upper(), s.upper()) for s in (sources or DEFAULT_SOURCES)]
     pulled = start <= today
 
+    key = resolve_firms_key(firms_key) if pulled else None
+    if pulled and not key:
+        raise MissingFirmsKey("No NASA FIRMS MAP_KEY: set the FIRMS_MAP_KEY environment variable or "
+                              "enter your key in the dashboard. Nothing was downloaded; today is not marked done.")
+
     try:
         if pulled:
             dl_args = ["download_firms", "--start", start.isoformat(), "--end", today.isoformat(),
@@ -171,7 +189,7 @@ def run(force=False, sources=None, bbox=None, initial_lookback_days=10,
                 dl_args += ["--bbox", bbox]
             if force:
                 dl_args.append("--force")
-            _run_step(dl_args)
+            _run_step(dl_args, firms_key=key)
 
             _run_step(["preprocess"])
             _run_step(["harmonize"])
@@ -253,8 +271,14 @@ def main():
 # ---------------------------------------------------------------------------------------
 _scheduler_started = False
 _scheduler_lock = threading.Lock()
+_wake = threading.Event()   # set when a user enters a FIRMS key, so the scheduler need not wait for midnight
 RETRY_DELAY_S = 30 * 60   # a failed scheduled refresh is retried after this long ...
 MAX_QUICK_RETRIES = 3     # ... up to this many times in a row, then it waits for the next UTC midnight
+
+
+def notify_key_available() -> None:
+    """Wake the background scheduler (if running) because a FIRMS key may now be available."""
+    _wake.set()
 
 
 def start_background_scheduler(initial_lookback_days: int = 10) -> None:
@@ -285,6 +309,12 @@ def _scheduler_loop(initial_lookback_days: int) -> None:
         try:
             run(initial_lookback_days=initial_lookback_days)
             failures = 0
+        except MissingFirmsKey:
+            # Not a failure: nothing is broken until a key shows up. Wait quietly (no traceback, no
+            # retry counting) and run again as soon as the dashboard receives one.
+            failures = 0
+            print("[auto_update] no FIRMS MAP_KEY yet: set FIRMS_MAP_KEY or enter your key in the "
+                  "dashboard; the refresh runs as soon as one is available.", flush=True)
         except Exception:
             print("[auto_update] refresh attempt failed:", file=sys.stderr, flush=True)
             traceback.print_exc()
@@ -298,7 +328,8 @@ def _scheduler_loop(initial_lookback_days: int) -> None:
                 failures = 0   # give up for now; the next scheduled day starts fresh
         next_at = datetime.now(timezone.utc) + timedelta(seconds=sleep_s)
         print(f"[auto_update] next refresh in {sleep_s / 3600:.1f}h (~{next_at.isoformat()})", flush=True)
-        time.sleep(sleep_s)
+        _wake.wait(sleep_s)   # returns early if a user enters a key meanwhile
+        _wake.clear()
 
 
 if __name__ == "__main__":

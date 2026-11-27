@@ -1,4 +1,6 @@
 import os
+import re
+import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -153,3 +155,58 @@ def ensure_dirs() -> None:
     """Create the output folder. Called by the pipeline entry points (preprocess, harmonize, anomaly, ...), NOT at import
     time: importing core from Django or a test must not create folders as a side effect."""
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# --- NASA FIRMS MAP_KEY -------------------------------------------------------
+# One rule for the whole project: the FIRMS_MAP_KEY environment variable (also read from .env) is
+# used when it is set. Only when it is not, the key a user typed into the dashboard is used instead.
+# That key lives in this process's memory only -- never on disk, in the state file or in a log.
+#
+# A MAP_KEY is a short alphanumeric token and ends up inside a URL path, so a user-supplied key
+# is accepted only if it is letters and digits; anything else could alter the request URL.
+_FIRMS_KEY_RE = re.compile(r"[A-Za-z0-9]{16,64}")
+_user_key_lock = threading.Lock()
+_user_firms_key: str | None = None
+
+
+def is_valid_firms_key(key) -> bool:
+    return isinstance(key, str) and _FIRMS_KEY_RE.fullmatch(key.strip()) is not None
+
+
+def env_firms_key() -> str | None:
+    """The key from the FIRMS_MAP_KEY environment variable, or None if unset/blank."""
+    return (os.getenv("FIRMS_MAP_KEY") or "").strip() or None
+
+
+def set_user_firms_key(key: str | None) -> None:
+    """Remember (or, with None/"", forget) the key the user typed. Raises ValueError if malformed."""
+    global _user_firms_key
+    key = (key or "").strip()
+    if key and not is_valid_firms_key(key):
+        raise ValueError("That does not look like a FIRMS MAP_KEY (it should be letters and digits only).")
+    with _user_key_lock:
+        _user_firms_key = key or None
+
+
+def has_user_firms_key() -> bool:
+    with _user_key_lock:
+        return _user_firms_key is not None
+
+
+def resolve_firms_key(user_key: str | None = None) -> str | None:
+    """Return the FIRMS MAP_KEY to use, or None if there is none.
+
+    Order: FIRMS_MAP_KEY environment variable; else `user_key` if the caller passes one; else the
+    key stored with set_user_firms_key(). Whichever is chosen is used identically downstream --
+    callers must never log, print or persist it.
+    """
+    env = env_firms_key()
+    if env:
+        return env
+    with _user_key_lock:
+        stored = _user_firms_key
+    for candidate in (user_key, stored):
+        candidate = (candidate or "").strip()
+        if candidate and is_valid_firms_key(candidate):
+            return candidate
+    return None

@@ -32,6 +32,8 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
+from core.src.config import resolve_firms_key
+
 GRID_DEG = 0.02
 FRP_BIN_MIN = 90
 FRP_MATCH_MIN = 180
@@ -182,12 +184,15 @@ def harmonize(modis: pd.DataFrame, viirs: pd.DataFrame):
 # --------------------------------------------------------------------------- #
 # Optional: pull the latest near-real-time detections (needs a free MAP_KEY)
 # --------------------------------------------------------------------------- #
-def fetch_live(key: str, bbox, days: int = 40) -> dict[str, pd.DataFrame]:
+def fetch_live(key: str | None, bbox, days: int = 40) -> dict[str, pd.DataFrame]:
     """Download the last `days` days of NRT MODIS + VIIRS(SNPP) detections.
 
     Returns {"M": raw_df, "V": raw_df}, ready to be concatenated with archive
     raw frames before calling prepare().
     """
+    key = resolve_firms_key(key)  # FIRMS_MAP_KEY env first, else the key the user entered
+    if not key:
+        raise RuntimeError("No NASA FIRMS MAP_KEY: set FIRMS_MAP_KEY or enter your key.")
     la0, la1, lo0, lo1 = bbox
     area = f"{lo0},{la0},{lo1},{la1}"  # west,south,east,north
     today = datetime.now(timezone.utc).date()

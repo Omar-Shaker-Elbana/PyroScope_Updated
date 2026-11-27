@@ -2,6 +2,146 @@
 
 PyroScope harmonizes NASA FIRMS MODIS and VIIRS 375 m active-fire detections **worldwide** (NASA Space Apps challenge "Harmonization of MODIS and VIIRS hot spots"). Every step runs globally by default; `PYRO_BBOX` / `PYRO_AOI_FILE` only restrict the region. Egypt was the author's regional development test case, not a limit of the method.
 
+## Installation guide
+
+A step-by-step setup for a fresh machine. Commands are written for **Windows PowerShell**; where macOS/Linux differ, it is said. The whole thing takes about ten minutes, plus the time the first data build needs (step 6).
+
+### Prerequisites
+
+| You need | Why | Check it with |
+|---|---|---|
+| **Git 2.35 or newer** | the clone command below uses sparse checkout | `git --version` |
+| **Git LFS** | the files under `data/` are stored with Git LFS (see `.gitattributes`) | `git lfs version` |
+| **Python 3.12 or newer** | the web dashboard uses Django 6, which needs it | `python --version` |
+| **A free NASA FIRMS MAP_KEY** | to download new fire detections (step 3) | |
+| **About 3 GB of free disk** | `data/raw` is about 0.8 GB, the files the pipeline generates were about 1.3 GB in the author's run, plus the Python packages | |
+
+Git for Windows already includes Git LFS. On macOS: `brew install git-lfs`. On Debian/Ubuntu: `sudo apt install git-lfs`.
+
+### Step 1: Clone the repository (without the generated folders)
+
+```powershell
+git lfs install
+git clone --filter=blob:none --no-checkout https://github.com/Omar-Shaker-Elbana/PyroScope_Updated.git
+cd PyroScope_Updated
+git sparse-checkout set --no-cone '/*' '!/data/processed/' '!/data/outputs/' '!/data/cache/' '!/data/data/' '!/patches/' '!/db.sqlite3' '!__pycache__/'
+git checkout main
+```
+
+(The same commands work on macOS/Linux.) This downloads everything the project needs and skips what it creates by itself, so you do not download over 1 GB of generated files:
+
+* **Included:** all the code, `data/raw/` (the FIRMS CSVs), `data/aoi/`, `core/sample_data/`.
+* **Skipped:** `data/processed/` and `data/outputs/` (rebuilt locally in step 6), `data/cache/` (country borders, downloaded automatically when first needed), `data/data/` (a stray duplicate of some `data/raw` files), `patches/`, `db.sqlite3` (created in step 5) and every `__pycache__/`.
+
+Do **not** use GitHub's "Download ZIP": it does not contain Git LFS files, only tiny text placeholders in their place.
+
+### Step 2: Create a virtual environment and install the dependencies
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+On macOS/Linux activate with `source .venv/bin/activate` instead. If PowerShell refuses to run the activation script, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once and try again.
+
+`requirements.txt` installs Django, the engine's packages (pandas, numpy, matplotlib, scipy, scikit-learn, joblib, geopandas) and python-dotenv. `rasterio` and `pyproj` are optional and only needed for the burned-area check in section 9.
+
+### Step 3: Get a free NASA FIRMS MAP_KEY
+
+1. Open https://firms.modaps.eosdis.nasa.gov/api/map_key/ and request a MAP_KEY. NASA e-mails it to you.
+2. A MAP_KEY is a string of letters and digits. Keep it private.
+3. FIRMS allows 5,000 requests per 10 minutes per key. If you hit that limit the downloader waits and retries by itself.
+
+### Step 4: Give the key to PyroScope
+
+Pick **one** of these. If more than one is present, the order of priority is (a)/(b) first, then (c).
+
+**(a) A `.env` file (recommended, survives restarts).** Create a file named `.env` in the project folder (next to `manage.py`) containing one line, with no quotes and no spaces:
+
+```
+FIRMS_MAP_KEY=your_key_here
+```
+
+`.env` is git-ignored, so it is never committed.
+
+**(b) An environment variable for the current terminal only:**
+
+```powershell
+$env:FIRMS_MAP_KEY="your_key_here"      # PowerShell
+export FIRMS_MAP_KEY=your_key_here      # macOS/Linux
+```
+
+**(c) Typed into the dashboard.** In the dashboard, open **Live NASA FIRMS feed**, paste the key into the **MAP_KEY** box and press **Start live**. That key drives the live feed in your browser. If the server has no `FIRMS_MAP_KEY` of its own (a or b), the server also uses the key you typed for its automatic daily update. It is kept in the server's memory only (never written to disk) and is forgotten when the server restarts. Only letters and digits are accepted.
+
+To check that (a) or (b) works (this does not print the key):
+
+```powershell
+python -c "from core.src.config import env_firms_key; print('key found' if env_firms_key() else 'no key')"
+```
+
+### Step 5: Create the local database
+
+```powershell
+python manage.py migrate
+```
+
+This creates `db.sqlite3` (Django's own tables; the fire data is not stored in it).
+
+### Step 6: Build the data (first run only)
+
+`data/raw/` came with the clone, but `data/processed/` and `data/outputs/` are generated on your machine. Run these once, in this order, from the project folder:
+
+```powershell
+python manage.py preprocess          # standardize data/raw into data/processed
+python manage.py harmonize           # MODIS-VIIRS matching, FRP scale k, daily calendar
+python manage.py detect_anomalies    # unusual days and critical burning windows
+python manage.py train_countries     # trains the forecast model into data/outputs
+python manage.py predict_countries   # 14-day forecast per country
+python manage.py live_confidence     # the confidence scores the dashboard shows
+```
+
+* The first three need no key and read everything in `data/raw/`, so they can take a long time on the full set. Progress is printed to the console.
+* `train_countries` downloads the Natural Earth country borders once (internet needed) and caches them in `data/cache/`. Countries with less than 730 days of data since their first detection are not forecast (section 13).
+* To try the pipeline on a smaller slice first, restrict the region or dates with the `PYRO_*` variables from section 4 (for example `PYRO_START` / `PYRO_END`).
+* Once a key is set (step 4), the server also does the calendar part itself on its first start: it downloads the missing near-real-time days, then runs `preprocess`, `harmonize` and `detect_anomalies`. It never trains the model, so `train_countries` is always a step you run yourself (section 11).
+
+### Step 7: Start the server
+
+```powershell
+python manage.py runserver
+```
+
+Open http://127.0.0.1:8000/ for the landing page and http://127.0.0.1:8000/dashboard/ for the dashboard. To use another port: `python manage.py runserver 6123`. Stop the server with `Ctrl+C`.
+
+Lines starting with `[auto_update]` in the console come from the background refresh (section 11). `already completed today ... nothing to do` is normal. `no FIRMS MAP_KEY yet` means the refresh is waiting for a key (step 4) and will start by itself as soon as one is available. Leave the server running and it pulls new data after every UTC midnight.
+
+### What is in the clone and what is generated
+
+| Path | In the clone? | What it is |
+|---|---|---|
+| `data/raw/` | yes | FIRMS CSVs: a regional (`_bbox_`) standard-processing archive for 2015-2025 and near-real-time files for 2026. New days are added by `download_firms` / `auto_update`. |
+| `data/aoi/` | yes | `egypt.geojson`, the one ready-made country mask |
+| `core/sample_data/` | yes | synthetic multi-year demo files (not real fires) |
+| `data/processed/` | no | generated by `preprocess`, `harmonize`, `detect_anomalies` |
+| `data/outputs/` | no | generated by `train_countries`, `predict_countries`, `live_confidence` |
+| `data/cache/` | no | country borders, downloaded automatically on first use |
+| `data/data/` | no | stray duplicate of some `data/raw` files; not used |
+| `db.sqlite3` | no | created by `migrate` |
+| `patches/` | no | development patch files |
+| `__pycache__/` | no | Python bytecode, created automatically |
+
+### Updating and troubleshooting
+
+* **Get newer code:** `git pull`. The skip list from step 1 stays in effect.
+* **Download everything that was skipped** (over 1 GB): `git sparse-checkout disable`.
+* **A CSV in `data/raw` contains `version https://git-lfs.github.com/spec/v1`:** Git LFS was not active when you cloned. Run `git lfs install`, then `git lfs pull --include="data/raw/*,data/aoi/*"`.
+* **`ModuleNotFoundError: No module named 'dotenv'`:** run `pip install -r requirements.txt` again with the virtual environment active (or `pip install python-dotenv`).
+* **Dashboard cards say "Required pipeline output is missing" (HTTP 503):** the data has not been built yet, so run step 6.
+* **`No MAP_KEY` or `no FIRMS MAP_KEY yet`:** see step 4.
+* **`Invalid MAP_KEY` from FIRMS right after downloads were working:** usually the 10-minute request limit, not a bad key. The downloader waits and retries by itself.
+
 ## Scientific scope
 
 **Phase A (ingestion and exploration, implemented):** MODIS Collection 6.1 active-fire CSVs and VIIRS 375 m active-fire CSVs (S-NPP, NOAA-20 and/or NOAA-21). This phase validates ingestion, cleaning and exploratory analysis (`inspect_data`, `preprocess`, `plot_overview`); the harmonization itself is Phase B.
@@ -38,17 +178,7 @@ Invoke-WebRequest https://firms.modaps.eosdis.nasa.gov/data/active_fire/noaa-20-
 
 ## 2. Install
 
-Python 3.10+ recommended.
-
-```bash
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-source .venv/bin/activate
-
-pip install -r requirements.txt
-```
+See the [Installation guide](#installation-guide) at the top (Python 3.12+, virtual environment, `pip install -r requirements.txt`). The engine alone (`core`, used with `python -m core.src...` as in the sections below) needs only `core/requirements.txt`.
 
 ## 3. Inspect raw files
 
@@ -226,7 +356,7 @@ Options: `--sources` (default `MODIS_NRT VIIRS_NOAA20_NRT`; an `_SP` or S-NPP na
 
 **Suomi NPP (S-NPP)'s NRT feed was permanently retired on 2026-11-02 13:00 UTC** (NASA stopped delivering new FIRMS data from that satellite; historical S-NPP data is unaffected). `auto_update` therefore defaults to `VIIRS_NOAA20_NRT` for the daily top-up, not `VIIRS_SNPP_NRT`. This does NOT by itself change which satellite `harmonize` treats as the trust-scale *reference* -- `pick_ref_sat()` in `core/src/harmonize.py` picks whichever VIIRS satellite has the most **historical** days, and S-NPP's multi-year archive will keep winning that count for a long time even though it is now frozen. In practice that means days after 2026-11-02 will keep landing in `viirs_not_observed` status until either NOAA-20's accumulated day count (archive + NRT) overtakes S-NPP's, or you force the switch yourself with `PYRO_REF_SAT=NOAA-20` (after backfilling NOAA-20's own SP archive the same way section 7 describes for S-NPP, e.g. `--start 2018-04-01 --sources VIIRS_NOAA20_SP`) -- a one-time, deliberate decision, not something `auto_update` does on its own.
 
-**Runs itself while the server is up.** You do not have to schedule it at all for normal use: `dashboard/apps.py` starts an in-process scheduler the moment `python manage.py runserver` comes up (`core.src.auto_update.start_background_scheduler`). It runs one refresh immediately in a background thread, then one again a few minutes after every UTC midnight for as long as that server process keeps running -- so leaving the dev server running across midnight picks up each new day on its own, with no cron job needed on top of it. It only ever starts in the one process that actually serves requests (not `migrate` / `test` / `shell`, and not the autoreloader's watcher process when the reloader is on). Set `PYRO_AUTO_UPDATE_ON_START=0` to turn this off and rely only on running `auto_update` yourself or from an external scheduler. A refresh attempt that fails (no `FIRMS_MAP_KEY`, FIRMS unreachable, ...) is logged to the console and retried 30 minutes later (up to 3 times in a row), then at the next scheduled time; it never crashes the server.
+**Runs itself while the server is up.** You do not have to schedule it at all for normal use: `dashboard/apps.py` starts an in-process scheduler the moment `python manage.py runserver` comes up (`core.src.auto_update.start_background_scheduler`). It runs one refresh immediately in a background thread, then one again a few minutes after every UTC midnight for as long as that server process keeps running -- so leaving the dev server running across midnight picks up each new day on its own, with no cron job needed on top of it. It only ever starts in the one process that actually serves requests (not `migrate` / `test` / `shell`, and not the autoreloader's watcher process when the reloader is on). Set `PYRO_AUTO_UPDATE_ON_START=0` to turn this off and rely only on running `auto_update` yourself or from an external scheduler. A refresh attempt that fails (FIRMS unreachable, a locked file, ...) is logged to the console and retried 30 minutes later (up to 3 times in a row), then at the next scheduled time; it never crashes the server. With no MAP_KEY at all the scheduler does not count that as a failure: it prints one `no FIRMS MAP_KEY yet` line, waits, and refreshes as soon as a key is available (the `FIRMS_MAP_KEY` environment variable or `.env`, or a key typed into the dashboard's live-feed box, which the server keeps in memory only and only uses when the environment variable is not set).
 
 ## 12. Real-time confidence: data x%, and y% once our forecast agrees (`live_confidence`)
 

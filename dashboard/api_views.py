@@ -7,9 +7,16 @@ from pathlib import Path
 import pandas as pd
 
 from django.http import JsonResponse
-from django.views.decorators.http import require_GET
+from django.views.decorators.cache import never_cache
+from django.views.decorators.http import require_GET, require_http_methods
 
-from core.src.config import PROCESSED_DIR, OUTPUTS_DIR
+from core.src.config import (
+    PROCESSED_DIR,
+    OUTPUTS_DIR,
+    env_firms_key,
+    has_user_firms_key,
+    set_user_firms_key,
+)
 
 
 # ---------------------------------------------------------
@@ -235,6 +242,58 @@ def api_status(request):
         ) else "incomplete",
         "artifacts": available,
     })
+
+
+# ---------------------------------------------------------
+# 1b. NASA FIRMS MAP_KEY (typed by the user in the dashboard)
+# ---------------------------------------------------------
+
+def _firms_key_status():
+    """Which key the server would use. Never contains the key itself."""
+    env = env_firms_key() is not None
+    user = has_user_firms_key()
+    return JsonResponse({
+        "success": True,
+        "env_key": env,
+        "user_key": user,
+        "active": "env" if env else ("user" if user else None),
+    })
+
+
+@never_cache
+@require_http_methods(["GET", "POST", "DELETE"])
+def api_firms_key(request):
+    """GET: is a key available?  POST {"key": "..."}: remember the user's key.  DELETE: forget it.
+
+    The FIRMS_MAP_KEY environment variable always wins; a key posted here is only used (and only
+    kept, in server memory) when that variable is not set. The key is never returned or logged.
+    """
+    if request.method == "GET":
+        return _firms_key_status()
+
+    if request.method == "DELETE":
+        set_user_firms_key(None)
+        return _firms_key_status()
+
+    try:
+        payload = json.loads(request.body or b"{}")
+    except (ValueError, UnicodeDecodeError):
+        return error_response("Send JSON like {\"key\": \"<your MAP_KEY>\"}.")
+    key = payload.get("key") if isinstance(payload, dict) else None
+
+    if env_firms_key() is not None:
+        return _firms_key_status()  # the server already has its own key; do not keep a second copy
+
+    try:
+        set_user_firms_key(key)
+    except ValueError as exc:
+        return error_response(str(exc))
+
+    if key:
+        from core.src import auto_update
+        auto_update.notify_key_available()  # let a waiting background refresh start now
+
+    return _firms_key_status()
 
 
 # ---------------------------------------------------------
