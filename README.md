@@ -4,34 +4,29 @@ PyroScope harmonizes NASA FIRMS MODIS and VIIRS 375 m active-fire detections **w
 
 ## Installation guide
 
-A step-by-step setup for a fresh machine. Commands are written for **Windows PowerShell**; where macOS/Linux differ, it is said. The whole thing takes about ten minutes, plus the time the first data build needs (step 6).
+A step-by-step setup for a fresh machine. Commands are written for **Windows PowerShell**; where macOS/Linux differ, it is said. Setup itself takes about ten minutes, plus the time to download the repository (about 2.5 GB, mostly data files).
 
 ### Prerequisites
 
 | You need | Why | Check it with |
 |---|---|---|
-| **Git 2.35 or newer** | the clone command below uses sparse checkout | `git --version` |
+| **Git** | to clone the repository | `git --version` |
 | **Git LFS** | the files under `data/` are stored with Git LFS (see `.gitattributes`) | `git lfs version` |
 | **Python 3.12 or newer** | the web dashboard uses Django 6, which needs it | `python --version` |
 | **A free NASA FIRMS MAP_KEY** | to download new fire detections (step 3) | |
-| **About 3 GB of free disk** | `data/raw` is about 0.8 GB, the files the pipeline generates were about 1.3 GB in the author's run, plus the Python packages | |
+| **About 6 GB of free disk** | the data files are about 2 GB (`data/processed` about 1.3 GB, `data/raw` about 0.8 GB) and Git LFS keeps a second copy of each inside `.git`; the Git history adds about 0.4 GB, and the Python packages some more | |
 
 Git for Windows already includes Git LFS. On macOS: `brew install git-lfs`. On Debian/Ubuntu: `sudo apt install git-lfs`.
 
-### Step 1: Clone the repository (without the generated folders)
+### Step 1: Clone the repository
 
 ```powershell
 git lfs install
-git clone --filter=blob:none --no-checkout https://github.com/Omar-Shaker-Elbana/PyroScope_Updated.git
+git clone https://github.com/Omar-Shaker-Elbana/PyroScope_Updated.git
 cd PyroScope_Updated
-git sparse-checkout set --no-cone '/*' '!/data/processed/' '!/data/outputs/' '!/data/cache/' '!/data/data/' '!/patches/' '!/db.sqlite3' '!__pycache__/'
-git checkout main
 ```
 
-(The same commands work on macOS/Linux.) This downloads everything the project needs and skips what it creates by itself, so you do not download over 1 GB of generated files:
-
-* **Included:** all the code, `data/raw/` (the FIRMS CSVs), `data/aoi/`, `core/sample_data/`.
-* **Skipped:** `data/processed/` and `data/outputs/` (rebuilt locally in step 6), `data/cache/` (country borders, downloaded automatically when first needed), `data/data/` (a stray duplicate of some `data/raw` files), `patches/`, `db.sqlite3` (created in step 5) and every `__pycache__/`.
+(The same commands work on macOS/Linux.) This is a normal, full clone: it brings the code, the FIRMS files in `data/raw/`, and the results the pipeline has already built in `data/processed/` and `data/outputs/`, so the dashboard has data to show as soon as it starts. The data files come through Git LFS, so the first clone takes a while. Run `git lfs install` before cloning (once per machine).
 
 Do **not** use GitHub's "Download ZIP": it does not contain Git LFS files, only tiny text placeholders in their place.
 
@@ -56,7 +51,7 @@ On macOS/Linux activate with `source .venv/bin/activate` instead. If PowerShell 
 
 ### Step 4: Give the key to PyroScope
 
-Pick **one** of these. If more than one is present, the order of priority is (a)/(b) first, then (c).
+The key is what lets PyroScope download new fire detections. Pick **one** of these. If more than one is present, the order of priority is (a)/(b) first, then (c).
 
 **(a) A `.env` file (recommended, survives restarts).** Create a file named `.env` in the project folder (next to `manage.py`) containing one line, with no quotes and no spaces:
 
@@ -81,17 +76,29 @@ To check that (a) or (b) works (this does not print the key):
 python -c "from core.src.config import env_firms_key; print('key found' if env_firms_key() else 'no key')"
 ```
 
-### Step 5: Create the local database
+### Step 5: Prepare the local database
 
 ```powershell
 python manage.py migrate
 ```
 
-This creates `db.sqlite3` (Django's own tables; the fire data is not stored in it).
+Django's own tables live in `db.sqlite3` (it comes with the clone; the fire data is not stored in it). This applies any pending migrations and creates the file if it is missing.
 
-### Step 6: Build the data (first run only)
+### Step 6: Start the server
 
-`data/raw/` came with the clone, but `data/processed/` and `data/outputs/` are generated on your machine. Run these once, in this order, from the project folder:
+```powershell
+python manage.py runserver
+```
+
+Open http://127.0.0.1:8000/ for the landing page and http://127.0.0.1:8000/dashboard/ for the dashboard. To use another port: `python manage.py runserver 6123`. Stop the server with `Ctrl+C`.
+
+The dashboard shows the data that came with the clone right away. With a key set (step 4), the server also brings that data up to date on its first start: it downloads the near-real-time days after the last one already in the calendar, then re-runs `preprocess`, `harmonize`, `detect_anomalies`, `predict_countries` and `live_confidence` (section 11). It never retrains the model.
+
+Lines starting with `[auto_update]` in the console come from this background refresh. `already completed today ... nothing to do` is normal. `no FIRMS MAP_KEY yet` means the refresh is waiting for a key (step 4) and will start by itself as soon as one is available. Leave the server running and it pulls new data after every UTC midnight.
+
+### Rebuilding the data from scratch (optional)
+
+The results in `data/processed/` and `data/outputs/` came with the clone, so this is only needed if you change the raw data or the settings, or you deleted those folders. Run these in this order from the project folder:
 
 ```powershell
 python manage.py preprocess          # standardize data/raw into data/processed
@@ -103,42 +110,31 @@ python manage.py live_confidence     # the confidence scores the dashboard shows
 ```
 
 * The first three need no key and read everything in `data/raw/`, so they can take a long time on the full set. Progress is printed to the console.
-* `train_countries` downloads the Natural Earth country borders once (internet needed) and caches them in `data/cache/`. Countries with less than 730 days of data since their first detection are not forecast (section 13).
+* `train_countries` downloads the Natural Earth country borders once if `data/cache/` does not have them (internet needed). Countries with less than 730 days of data since their first detection are not forecast (section 13).
 * To try the pipeline on a smaller slice first, restrict the region or dates with the `PYRO_*` variables from section 4 (for example `PYRO_START` / `PYRO_END`).
-* Once a key is set (step 4), the server also does the calendar part itself on its first start: it downloads the missing near-real-time days, then runs `preprocess`, `harmonize` and `detect_anomalies`. It never trains the model, so `train_countries` is always a step you run yourself (section 11).
+* `auto_update` never trains the model, so `train_countries` is always a step you run yourself (section 11).
 
-### Step 7: Start the server
+### What the folders are
 
-```powershell
-python manage.py runserver
-```
-
-Open http://127.0.0.1:8000/ for the landing page and http://127.0.0.1:8000/dashboard/ for the dashboard. To use another port: `python manage.py runserver 6123`. Stop the server with `Ctrl+C`.
-
-Lines starting with `[auto_update]` in the console come from the background refresh (section 11). `already completed today ... nothing to do` is normal. `no FIRMS MAP_KEY yet` means the refresh is waiting for a key (step 4) and will start by itself as soon as one is available. Leave the server running and it pulls new data after every UTC midnight.
-
-### What is in the clone and what is generated
-
-| Path | In the clone? | What it is |
+| Path | What it is | Rebuilt by |
 |---|---|---|
-| `data/raw/` | yes | FIRMS CSVs: a regional (`_bbox_`) standard-processing archive for 2015-2025 and near-real-time files for 2026. New days are added by `download_firms` / `auto_update`. |
-| `data/aoi/` | yes | `egypt.geojson`, the one ready-made country mask |
-| `core/sample_data/` | yes | synthetic multi-year demo files (not real fires) |
-| `data/processed/` | no | generated by `preprocess`, `harmonize`, `detect_anomalies` |
-| `data/outputs/` | no | generated by `train_countries`, `predict_countries`, `live_confidence` |
-| `data/cache/` | no | country borders, downloaded automatically on first use |
-| `data/data/` | no | stray duplicate of some `data/raw` files; not used |
-| `db.sqlite3` | no | created by `migrate` |
-| `patches/` | no | development patch files |
-| `__pycache__/` | no | Python bytecode, created automatically |
+| `data/raw/` | FIRMS CSVs: a regional (`_bbox_`) standard-processing archive for 2015-2025 and near-real-time files for 2026 | new days are added by `download_firms` / `auto_update` |
+| `data/processed/` | the pipeline's built results (calendar, anomalies, plots) | `preprocess`, `harmonize`, `detect_anomalies` |
+| `data/outputs/` | the trained forecast model, forecasts and confidence scores | `train_countries`, `predict_countries`, `live_confidence` |
+| `data/cache/` | country borders, downloaded once | re-downloaded automatically if deleted |
+| `data/aoi/` | `egypt.geojson`, the one ready-made country mask | |
+| `data/data/` | a duplicate of some `data/raw` files; not used by the project | |
+| `core/sample_data/` | synthetic multi-year demo files (not real fires) | |
+| `db.sqlite3` | Django's local database | `python manage.py migrate` |
+| `patches/` | development patch files | |
+| `__pycache__/` | Python bytecode | created automatically |
 
 ### Updating and troubleshooting
 
-* **Get newer code:** `git pull`. The skip list from step 1 stays in effect.
-* **Download everything that was skipped** (over 1 GB): `git sparse-checkout disable`.
-* **A CSV in `data/raw` contains `version https://git-lfs.github.com/spec/v1`:** Git LFS was not active when you cloned. Run `git lfs install`, then `git lfs pull --include="data/raw/*,data/aoi/*"`.
+* **Get newer code:** `git pull`.
+* **A CSV in `data/` contains `version https://git-lfs.github.com/spec/v1`, or the clone was interrupted:** the Git LFS files were not downloaded. Run `git lfs install`, then `git lfs pull` (it also resumes an interrupted download).
 * **`ModuleNotFoundError: No module named 'dotenv'`:** run `pip install -r requirements.txt` again with the virtual environment active (or `pip install python-dotenv`).
-* **Dashboard cards say "Required pipeline output is missing" (HTTP 503):** the data has not been built yet, so run step 6.
+* **Dashboard cards say "Required pipeline output is missing" (HTTP 503):** `data/processed/` or `data/outputs/` is missing or incomplete. Fix any Git LFS problem above first, then run the rebuild commands.
 * **`No MAP_KEY` or `no FIRMS MAP_KEY yet`:** see step 4.
 * **`Invalid MAP_KEY` from FIRMS right after downloads were working:** usually the 10-minute request limit, not a bad key. The downloader waits and retries by itself.
 
@@ -155,7 +151,7 @@ Methodology, the evidence behind each design decision and the known limits are i
 ## Data in this repository
 
 * `sample_data/synthetic_multiyear/` holds **synthetic** 2016-2022 FIRMS-format files (not real fires). They are only for running the pipeline end to end (`sample_data/README.txt`) and give no scientific result.
-* **Real FIRMS data is not committed** (`data/raw/` is git-ignored; the files are large). The pipeline itself is global: with no `PYRO_BBOX` / `PYRO_AOI_FILE` every step reads whatever is in `data/raw/` for the whole planet.
+* **Real FIRMS data ships with the repository through Git LFS** (`data/raw/`, about 0.8 GB, so a normal `git clone` downloads it; see the Installation guide). The pipeline itself is global: with no `PYRO_BBOX` / `PYRO_AOI_FILE` every step reads whatever is in `data/raw/` for the whole planet.
 * The figures labelled "Egypt 2015-2025" in this README, `CHANGELOG.md` and `docs/METHODOLOGY.md` (k values, the ~27 % per 10x FRP slope, VIIRS-to-Aqua total ratios, anomaly counts) come from the author's **regional development run** (Egypt bounding box `--bbox 24.7,21.7,36.9,31.7`). They show what the outputs look like; they are not global results, the scale `k` and its trust grade must be re-estimated for every region and period, and they cannot be checked from this repository alone. To approximate that run, download MODIS_SP and VIIRS_SNPP_SP for 2015-2025 with that `--bbox` (section 7), optionally set `PYRO_AOI_FILE=data/aoi/egypt.geojson` (the only country mask that ships), and run the pipeline; expect close, not identical, numbers because FIRMS archives are reprocessed over time.
 * Quick global check without an account: put the FIRMS global 24h files `MODIS_C6_1_Global_24h.csv` and `J1_VIIRS_C2_Global_24h.csv` (section 1) in `data/raw/` and run `preprocess` and `harmonize`. This only demonstrates the pipeline (see "Single-day demo").
 

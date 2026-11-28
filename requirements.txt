@@ -1,3 +1,21 @@
-# Whole project: the Django apps + the core engine's own dependencies.
--r core/requirements.txt
+# PyroScope: everything needed to run the web dashboard and the data pipeline.
+# Install with:  pip install -r requirements.txt
+# Needs Python 3.12 or newer (required by Django 6).
+
+# --- Web dashboard ---
 django>=6.0
+
+# --- Data pipeline and forecasting (core/) ---
+pandas>=2.2
+numpy>=1.26
+matplotlib>=3.8
+scipy>=1.11
+scikit-learn>=1.4      # core.forecast: HistGradientBoostingRegressor
+joblib>=1.3            # core.forecast: trained-model files
+geopandas>=1.0         # core.forecast.legacy_hotsync_data: country borders
+python-dotenv>=1.0     # core.src.config: reads FIRMS_MAP_KEY etc. from .env
+
+# --- Optional, only for core.src.external_validation (MCD64A1 burned-area HDF files) ---
+The Rasterio/GDAL build must support HDF4.
+rasterio
+pyproj
