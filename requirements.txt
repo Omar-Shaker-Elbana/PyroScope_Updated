@@ -16,6 +16,7 @@ geopandas>=1.0         # core.forecast.legacy_hotsync_data: country borders
 python-dotenv>=1.0     # core.src.config: reads FIRMS_MAP_KEY etc. from .env
 
 # --- Optional, only for core.src.external_validation (MCD64A1 burned-area HDF files) ---
-The Rasterio/GDAL build must support HDF4.
+#build must support HDF4.
+The Rasterio/GDAL 
 rasterio
 pyproj
